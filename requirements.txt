@@ -1,0 +1,6 @@
+pandas==2.2.2
+requests==2.32.3
+python-dateutil==2.9.0.post0
+soccerdata==2.7.3
+aiohttp==3.9.5
+understat==0.5.3
