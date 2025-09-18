@@ -1,0 +1,87 @@
+name: Soccer Betting Machine
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "0 9 * * *"   # 09:00 UTC daily
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Probe APIs (FBR / Odds API)
+        env:
+          FBR_API_KEY: ${{ secrets.FBR_API_KEY }}
+          THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
+        run: python scripts/test_endpoints.py
+
+      - name: Fetch Football-Data (historical)
+        run: python scripts/fetch_football_data.py
+
+      - name: Consolidate odds (optional; builds data/manual_odds.csv)
+        run: python scripts/consolidate_odds.py
+
+      - name: Fetch Odds (API or manual override)
+        env:
+          THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
+        run: python scripts/fetch_the_odds_api.py
+
+      - name: Fetch FBR team xG (current/last → hybrid)
+        env:
+          FBR_API_KEY: ${{ secrets.FBR_API_KEY }}
+        run: python scripts/fetch_fbr_team_xg.py
+
+      - name: Fetch via soccerdata (FBref/538/FD)
+        run: python scripts/fetch_soccerdata.py
+
+      - name: Merge FBref xG fallback into hybrid
+        run: python scripts/merge_sd_fbref_into_xg.py
+
+      - name: Bootstrap team priors from xG (optional)
+        run: python scripts/bootstrap_team_priors.py
+
+      - name: Ensure minimal data files exist
+        run: python scripts/ensure_min_files.py
+
+      - name: Enrich features (normalize + merge xG/injuries/lineups/refs/stadium)
+        run: python scripts/enrich_features.py
+
+      - name: Build HIST & UPCOMING for modeling
+        run: python scripts/build_hist_and_upcoming.py
+
+      - name: Build Upcoming 7-day window (enriched)
+        run: python scripts/build_upcoming_window.py
+
+      - name: Validate/summarize datasets
+        run: python scripts/validate_data.py
+
+      - name: Optional: generate 7-day predictions
+        run: python scripts/model_predict.py
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbm-7d-bundle
+          path: |
+            data/HIST_matches.csv
+            data/UPCOMING_fixtures.csv
+            data/UPCOMING_7D_enriched.csv
+            data/PREDICTIONS_7D.csv
+            data/xg_metrics_current.csv
+            data/xg_metrics_last.csv
+            data/xg_metrics_hybrid.csv
+            data/api_probe_report.json
