@@ -1,9 +1,7 @@
 name: Soccer Betting Machine
 
 on:
-  # Manually run any time
   workflow_dispatch: {}
-  # Daily 09:00 UTC (change as you like)
   schedule:
     - cron: "0 9 * * *"
 
@@ -12,92 +10,71 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 0) Checkout repo
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 1) Setup Python
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # 2) Install dependencies
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # 3) Probe APIs (FBR / Odds API)
       - name: Probe APIs (FBR / Odds API)
         env:
           FBR_API_KEY: ${{ secrets.FBR_API_KEY }}
           THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
         run: python scripts/test_endpoints.py
 
-      # 4) Historical backbone (Football-Data.co.uk)
       - name: Fetch Football-Data (historical)
         run: python scripts/fetch_football_data.py
 
-      # 5) (Optional) If you upload fanduel_odds.csv, this merges to manual_odds.csv
       - name: Consolidate odds (optional; builds data/manual_odds.csv)
         run: python scripts/consolidate_odds.py
 
-      # 6) Morning odds for upcoming fixtures
-      #    Uses data/manual_odds.csv (FanDuel) if present; else calls The Odds API.
-      #    Never fails; writes empty if nothing available.
       - name: Fetch Odds (API or manual override)
         env:
           THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
         run: python scripts/fetch_the_odds_api.py
 
-      # 7) xG primary: FBR (current/last → hybrid)
       - name: Fetch FBR team xG (current/last → hybrid)
         env:
           FBR_API_KEY: ${{ secrets.FBR_API_KEY }}
         run: python scripts/fetch_fbr_team_xg.py
 
-      # 8) soccerdata pulls: FBref team stats (fallback xG), 538 SPI, FD fixtures (7d)
       - name: Fetch via soccerdata (FBref/538/FD)
         run: python scripts/fetch_soccerdata.py
 
-      # 9) Merge FBref xG fallback into hybrid (only where FBR missing)
       - name: Merge FBref xG fallback into hybrid
         run: python scripts/merge_sd_fbref_into_xg.py
 
-      # 10) Bootstrap team priors (GK/set-piece/crowd) from hybrid xG (optional)
       - name: Bootstrap team priors from xG (optional)
         run: python scripts/bootstrap_team_priors.py
 
-      # 11) Preflight: ensure all CSVs exist with headers (avoids EmptyDataError)
       - name: Ensure minimal data files exist
         run: python scripts/ensure_min_files.py
 
-      # 12) Generate matchday templates (injuries/lineups) for next 7 days
       - name: Generate matchday injuries/lineups templates (next 7 days)
         run: python scripts/generate_matchday_templates.py
 
-      # 13) Build "Upcoming 7-day" enriched table
       - name: Build Upcoming 7-day window (enriched)
         run: python scripts/build_upcoming_window.py
 
-      # 14) Enrich raw files (normalize + merge xG/injuries/lineups/refs/stadium)
       - name: Enrich features (normalize + merge xG/injuries/lineups/refs/stadium)
         run: python scripts/enrich_features.py
 
-      # 15) Build final model schema CSVs
       - name: Build HIST & UPCOMING for modeling
         run: python scripts/build_hist_and_upcoming.py
 
-      # 16) Data inventory report (what we have)
       - name: Data inventory report (what we have)
         run: python scripts/data_inventory_report.py
 
-      # 17) (Optional) 7-day predictions (Market+Elo(+xG) + Kelly if odds provided)
       - name: Optional: generate 7-day predictions
         run: python scripts/model_predict.py
 
-      # 18) Upload bundle artifact
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
