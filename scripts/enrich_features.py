@@ -1,6 +1,6 @@
 # scripts/enrich_features.py
-# Robust enrichment: normalize names, merge team priors, injuries, lineups,
-# refs, stadium travel, and xG hybrid. Syntax-checked.
+# Enrichment pipeline: normalize names, merge team priors, injuries, lineups,
+# refs, stadium travel, and xG hybrid.
 
 import os
 import math
@@ -97,7 +97,7 @@ def apply_injuries(df: pd.DataFrame, inj: pd.DataFrame) -> pd.DataFrame:
     df = ensure_cols(df, {"home_injury_index": None, "away_injury_index": None})
     df = df.merge(inj.rename(columns={"team": "home_team", "injury_index": "home_injury_index"}),
                   on=["date","home_team"], how="left")
-    df = df.merge(inj.rename(columns={"team": "away_team", "injury_index": "away_injury_index"]),
+    df = df.merge(inj.rename(columns={"team": "away_team", "injury_index": "away_injury_index"}),
                   on=["date","away_team"], how="left")
     df = coalesce(df, "home_injury_index", 0.3)
     df = coalesce(df, "away_injury_index", 0.3)
@@ -160,8 +160,7 @@ def merge_xg_hybrid(df: pd.DataFrame, xgdf: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # ---------- main ----------
-def enrich_file(path: str, teams: pd.DataFrame, stad: pd.DataFrame, refs: pd.DataFrame,
-                inj: pd.DataFrame, lu: pd.DataFrame, xgdf: pd.DataFrame, name_map: dict):
+def enrich_file(path: str, teams, stad, refs, inj, lu, xgdf, name_map):
     if not os.path.exists(path):
         return
     df = safe_read(path)
