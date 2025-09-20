@@ -1,4 +1,4 @@
-
+name: Soccer Betting Machine
 
 on:
   workflow_dispatch: {}
