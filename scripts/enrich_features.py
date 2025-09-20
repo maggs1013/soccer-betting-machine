@@ -1,4 +1,4 @@
-# /enrich_features.py
+# scripts/enrich_features.py
 # Robust enrichment: normalize names, merge team priors, injuries, lineups,
 # refs, stadium travel, and xG hybrid. Syntax-checked.
 
