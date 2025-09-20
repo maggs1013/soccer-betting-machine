@@ -8,7 +8,6 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -18,12 +17,13 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
 
-      - name: Probe APIs (FBR / Odds API)
+      - name: Install requirements
+        run: pip install -r requirements.txt
+
+      - name: Probe APIs
         env:
           FBR_API_KEY: ${{ secrets.FBR_API_KEY }}
           THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
@@ -32,7 +32,7 @@ jobs:
       - name: Fetch Football-Data (historical)
         run: python scripts/fetch_football_data.py
 
-      - name: Consolidate odds (optional; builds data/manual_odds.csv)
+      - name: Consolidate odds (optional)
         run: python scripts/consolidate_odds.py
 
       - name: Fetch Odds (API or manual override)
@@ -40,39 +40,39 @@ jobs:
           THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
         run: python scripts/fetch_the_odds_api.py
 
-      - name: Fetch FBR team xG (current/last → hybrid)
+      - name: Fetch FBR team xG (hybrid)
         env:
           FBR_API_KEY: ${{ secrets.FBR_API_KEY }}
         run: python scripts/fetch_fbr_team_xg.py
 
-      - name: Fetch via soccerdata (FBref/538/FD)
+      - name: Fetch via soccerdata
         run: python scripts/fetch_soccerdata.py
 
-      - name: Merge FBref xG fallback into hybrid
+      - name: Merge FBref xG fallback
         run: python scripts/merge_sd_fbref_into_xg.py
 
-      - name: Bootstrap team priors from xG (optional)
+      - name: Bootstrap team priors (optional)
         run: python scripts/bootstrap_team_priors.py
 
       - name: Ensure minimal data files exist
         run: python scripts/ensure_min_files.py
 
-      - name: Generate matchday injuries/lineups templates (next 7 days)
+      - name: Generate matchday templates (next 7 days)
         run: python scripts/generate_matchday_templates.py
 
       - name: Build Upcoming 7-day window (enriched)
         run: python scripts/build_upcoming_window.py
 
-      - name: Enrich features (normalize + merge xG/injuries/lineups/refs/stadium)
+      - name: Enrich features
         run: python scripts/enrich_features.py
 
-      - name: Build HIST & UPCOMING for modeling
+      - name: Build HIST & UPCOMING
         run: python scripts/build_hist_and_upcoming.py
 
-      - name: Data inventory report (what we have)
+      - name: Data inventory report
         run: python scripts/data_inventory_report.py
 
-      - name: Optional: generate 7-day predictions
+      - name: Generate 7-day predictions (optional)
         run: python scripts/model_predict.py
 
       - name: Upload artifacts
