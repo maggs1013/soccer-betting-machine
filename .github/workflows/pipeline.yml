@@ -1,9 +1,10 @@
 name: Soccer Betting Machine
 
 on:
+  # Manually run any time
   workflow_dispatch: {}
+  # Daily 09:00 UTC (change as you like)
   schedule:
-    # Run every day at 09:00 UTC (adjust as you like)
     - cron: "0 9 * * *"
 
 jobs:
@@ -27,78 +28,95 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # 3) Probe APIs (optional visibility)
+      # 3) Probe APIs (FBR / Odds API)
       - name: Probe APIs (FBR / Odds API)
         env:
           FBR_API_KEY: ${{ secrets.FBR_API_KEY }}
           THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
         run: python scripts/test_endpoints.py
 
-      # 4) Historical results backbone (Football-Data.co.uk)
+      # 4) Historical backbone (Football-Data.co.uk)
       - name: Fetch Football-Data (historical)
         run: python scripts/fetch_football_data.py
 
-      # 5) (Optional) Merge any exported odds CSVs into manual_odds.csv
+      # 5) (Optional) Merge any exported odds files into data/manual_odds.csv
+      #    e.g., if you upload data/fanduel_odds.csv or data/oddsportal_export.csv
       - name: Consolidate odds (optional; builds data/manual_odds.csv)
         run: python scripts/consolidate_odds.py
 
-      # 6) Morning odds for upcoming fixtures
-      #    This script first uses data/manual_odds.csv (FanDuel) if present.
-      #    If not present, it calls The Odds API (if THE_ODDS_API_KEY is set).
-      #    It never fails the pipeline: writes an empty file if nothing available.
+      # 6) (OPTIONAL) ODDSPORTAL MODULE — SAFE
+      #    These steps do NOT scrape. They only:
+      #      - print instructions (wrapper)
+      #      - test schema of any raw files you dropped into data/oddsportal/raw/
+      #      - merge normalized odds to data/oddsportal_export.csv
+      #      - re-run consolidate_odds.py to prefer FanDuel, fallback to OddsPortal
+      - name: OddsPortal wrapper (no-op in CI; explains local usage)
+        run: python scripts/scrape_oddsportal.py
+
+      - name: OddsPortal schema test (optional)
+        run: python scripts/test_scraper_schema.py
+
+      - name: OddsPortal merge (optional → data/oddsportal_export.csv)
+        run: python scripts/merge_scraped_odds.py
+
+      - name: Consolidate odds (merge FanDuel + OddsPortal → manual_odds.csv)
+        run: python scripts/consolidate_odds.py
+
+      # 7) Morning odds for upcoming fixtures
+      #    Uses data/manual_odds.csv (FanDuel) if present; else calls The Odds API.
+      #    Never fails the build; writes empty file if nothing is available.
       - name: Fetch Odds (API or manual override)
         env:
           THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
         run: python scripts/fetch_the_odds_api.py
 
-      # 7) xG primary: FBR API (current + last → hybrid)
+      # 8) xG primary: FBR (current/last → hybrid)
       - name: Fetch FBR team xG (current/last → hybrid)
         env:
           FBR_API_KEY: ${{ secrets.FBR_API_KEY }}
         run: python scripts/fetch_fbr_team_xg.py
 
-      # 8) soccerdata pulls: FBref team stats (xG fallback), 538 SPI, FD fixtures (next 7 days)
+      # 9) soccerdata pulls: FBref team stats (fallback xG), 538 SPI, FD fixtures (7d)
       - name: Fetch via soccerdata (FBref/538/FD)
         run: python scripts/fetch_soccerdata.py
 
-      # 9) Merge FBref xG fallback into our hybrid xG (only where FBR is missing)
+      # 10) Merge FBref xG fallback into hybrid (only where FBR missing)
       - name: Merge FBref xG fallback into hybrid
         run: python scripts/merge_sd_fbref_into_xg.py
 
-      # 10) (Optional but recommended) Build teams_master.csv priors from hybrid xG
+      # 11) Bootstrap team priors (GK/set-piece/crowd) from hybrid xG (optional)
       - name: Bootstrap team priors from xG (optional)
         run: python scripts/bootstrap_team_priors.py
 
-      # 11) Preflight: guarantee all CSVs exist with headers (prevents EmptyDataError)
+      # 12) Preflight: ensure all CSVs exist with headers (avoids EmptyDataError)
       - name: Ensure minimal data files exist
         run: python scripts/ensure_min_files.py
 
-      # 12) Create matchday templates (injuries/lineups) for the next 7 days
-      #     Uses the fixtures pulled by soccerdata and filters to your leagues allowlist.
+      # 13) Generate matchday templates (injuries/lineups) for next 7 days
       - name: Generate matchday injuries/lineups templates (next 7 days)
         run: python scripts/generate_matchday_templates.py
 
-      # 13) Build "Upcoming 7-day" enriched table (odds + xG + placeholders)
+      # 14) Build "Upcoming 7-day" enriched table
       - name: Build Upcoming 7-day window (enriched)
         run: python scripts/build_upcoming_window.py
 
-      # 14) Enrich raw files (normalize names + merge xG/injuries/lineups/refs/stadium/travel)
+      # 15) Enrich raw files (normalize + merge xG/injuries/lineups/refs/stadium)
       - name: Enrich features (normalize + merge xG/injuries/lineups/refs/stadium)
         run: python scripts/enrich_features.py
 
-      # 15) Build final model schema CSVs
+      # 16) Build final model schema CSVs
       - name: Build HIST & UPCOMING for modeling
         run: python scripts/build_hist_and_upcoming.py
 
-      # 16) Council data inventory (what we have, from where, date ranges)
+      # 17) Data inventory report (what we have)
       - name: Data inventory report (what we have)
         run: python scripts/data_inventory_report.py
 
-      # 17) (Optional) Light model over the 7-day window (Market+Elo(+xG) + Kelly if odds present)
+      # 18) (Optional) 7-day predictions (Market+Elo(+xG) + Kelly if odds provided)
       - name: Optional: generate 7-day predictions
         run: python scripts/model_predict.py
 
-      # 18) Upload everything you need
+      # 19) Upload bundle artifact
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -113,3 +131,5 @@ jobs:
             data/xg_metrics_hybrid.csv
             data/teams_master.csv
             data/api_probe_report.json
+            data/oddsportal_export.csv
+            data/manual_odds.csv
