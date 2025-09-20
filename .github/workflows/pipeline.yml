@@ -3,75 +3,102 @@ name: Soccer Betting Machine
 on:
   workflow_dispatch: {}
   schedule:
-    - cron: "0 9 * * *"   # 09:00 UTC daily
+    # Run every day at 09:00 UTC (adjust as you like)
+    - cron: "0 9 * * *"
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
+      # 0) Checkout repo
       - name: Checkout
         uses: actions/checkout@v4
 
+      # 1) Setup Python
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+      # 2) Install dependencies
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # 3) Probe APIs (optional visibility)
       - name: Probe APIs (FBR / Odds API)
         env:
           FBR_API_KEY: ${{ secrets.FBR_API_KEY }}
           THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
         run: python scripts/test_endpoints.py
 
+      # 4) Historical results backbone (Football-Data.co.uk)
       - name: Fetch Football-Data (historical)
         run: python scripts/fetch_football_data.py
 
+      # 5) (Optional) Merge any exported odds CSVs into manual_odds.csv
       - name: Consolidate odds (optional; builds data/manual_odds.csv)
         run: python scripts/consolidate_odds.py
 
+      # 6) Morning odds for upcoming fixtures
+      #    This script first uses data/manual_odds.csv (FanDuel) if present.
+      #    If not present, it calls The Odds API (if THE_ODDS_API_KEY is set).
+      #    It never fails the pipeline: writes an empty file if nothing available.
       - name: Fetch Odds (API or manual override)
         env:
           THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
         run: python scripts/fetch_the_odds_api.py
 
+      # 7) xG primary: FBR API (current + last → hybrid)
       - name: Fetch FBR team xG (current/last → hybrid)
         env:
           FBR_API_KEY: ${{ secrets.FBR_API_KEY }}
         run: python scripts/fetch_fbr_team_xg.py
 
+      # 8) soccerdata pulls: FBref team stats (xG fallback), 538 SPI, FD fixtures (next 7 days)
       - name: Fetch via soccerdata (FBref/538/FD)
         run: python scripts/fetch_soccerdata.py
 
+      # 9) Merge FBref xG fallback into our hybrid xG (only where FBR is missing)
       - name: Merge FBref xG fallback into hybrid
         run: python scripts/merge_sd_fbref_into_xg.py
 
+      # 10) (Optional but recommended) Build teams_master.csv priors from hybrid xG
       - name: Bootstrap team priors from xG (optional)
         run: python scripts/bootstrap_team_priors.py
 
+      # 11) Preflight: guarantee all CSVs exist with headers (prevents EmptyDataError)
       - name: Ensure minimal data files exist
         run: python scripts/ensure_min_files.py
 
-      - name: Enrich features (normalize + merge xG/injuries/lineups/refs/stadium)
-        run: python scripts/enrich_features.py
+      # 12) Create matchday templates (injuries/lineups) for the next 7 days
+      #     Uses the fixtures pulled by soccerdata and filters to your leagues allowlist.
+      - name: Generate matchday injuries/lineups templates (next 7 days)
+        run: python scripts/generate_matchday_templates.py
 
-      - name: Build HIST & UPCOMING for modeling
-        run: python scripts/build_hist_and_upcoming.py
-
+      # 13) Build "Upcoming 7-day" enriched table (odds + xG + placeholders)
       - name: Build Upcoming 7-day window (enriched)
         run: python scripts/build_upcoming_window.py
 
-      - name: Validate/summarize datasets
-        run: python scripts/validate_data.py
+      # 14) Enrich raw files (normalize names + merge xG/injuries/lineups/refs/stadium/travel)
+      - name: Enrich features (normalize + merge xG/injuries/lineups/refs/stadium)
+        run: python scripts/enrich_features.py
 
+      # 15) Build final model schema CSVs
+      - name: Build HIST & UPCOMING for modeling
+        run: python scripts/build_hist_and_upcoming.py
+
+      # 16) Council data inventory (what we have, from where, date ranges)
+      - name: Data inventory report (what we have)
+        run: python scripts/data_inventory_report.py
+
+      # 17) (Optional) Light model over the 7-day window (Market+Elo(+xG) + Kelly if odds present)
       - name: Optional: generate 7-day predictions
         run: python scripts/model_predict.py
 
+      # 18) Upload everything you need
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -84,4 +111,5 @@ jobs:
             data/xg_metrics_current.csv
             data/xg_metrics_last.csv
             data/xg_metrics_hybrid.csv
+            data/teams_master.csv
             data/api_probe_report.json
