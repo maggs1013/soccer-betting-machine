@@ -5,3 +5,5 @@ soccerdata
 aiohttp
 understat
 statsbombpy
+scikit-learn
+numpy
