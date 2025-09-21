@@ -85,7 +85,7 @@ jobs:
       - name: Enrich fixtures (01 step)
         run: python 01_enrich_fixtures.py
 
-      - name: Enrich features (normalize + merge injuries/refs/stadium + SB extras)
+      - name: Enrich features (normalize + merge injuries/refs/stadium + SB team features)
         run: python scripts/enrich_features.py
 
       # Final schema
@@ -118,6 +118,17 @@ jobs:
       - name: Generate 7-day predictions (no-manual-odds mode)
         run: python scripts/model_predict.py
 
+      # --- NEW: #4 Evaluation & Actionability ---
+      - name: Backtest evaluate
+        run: python scripts/backtest_evaluate.py
+
+      - name: Calibration report
+        run: python scripts/calibration_report.py
+
+      - name: Actionability report
+        run: python scripts/actionability_report.py
+      # -----------------------------------------
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -133,6 +144,11 @@ jobs:
             data/team_form_features.csv
             data/model_blend.json
             data/calibrator.pkl
+            data/BACKTEST_SUMMARY.csv
+            data/BACKTEST_BY_WEEK.csv
+            data/CALIBRATION_TABLE.csv
+            data/CALIBRATION_SUMMARY.csv
+            data/ACTIONABILITY_REPORT.csv
             data/xg_metrics_current.csv
             data/xg_metrics_last.csv
             data/xg_metrics_hybrid.csv
