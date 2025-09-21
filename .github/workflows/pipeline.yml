@@ -24,12 +24,17 @@ jobs:
       - name: Install requirements
         run: pip install -r requirements.txt
 
+      # Make your util_*.py importable from anywhere
+      - name: Set PYTHONPATH
+        run: echo "PYTHONPATH=$GITHUB_WORKSPACE:$GITHUB_WORKSPACE/scripts" >> $GITHUB_ENV
+
       - name: Probe APIs (FBR / Odds API)
         env:
           FBR_API_KEY: ${{ secrets.FBR_API_KEY }}
           THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
         run: python scripts/test_endpoints.py
 
+      # --- Data fetch backbone ---
       - name: Fetch Football-Data (historical)
         run: python scripts/fetch_football_data.py
 
@@ -41,66 +46,81 @@ jobs:
           THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
         run: python scripts/fetch_the_odds_api.py
 
-      - name: Fetch FBR team xG (hybrid)
-        env:
-          FBR_API_KEY: ${{ secrets.FBR_API_KEY }}
-        run: python scripts/fetch_fbr_team_xg.py
-
       - name: Fetch via soccerdata (FBref + 538)
         run: python scripts/fetch_soccerdata.py
-
-      - name: Normalize team names across sources
-        run: python scripts/normalize_all_team_names.py
-
-      - name: Merge FBref xG fallback into hybrid
-        run: python scripts/merge_sd_fbref_into_xg.py
 
       - name: Fetch Understat xG (Big-5)
         run: python scripts/fetch_understat_xg.py
 
-      - name: Merge Understat xG into hybrid (fill missing only)
-        run: python scripts/merge_understat_into_xg.py
-
       - name: Fetch StatsBomb xG (open data)
         run: python scripts/fetch_statsbomb_xg.py
+
+      # Normalize team names across sources with BOTH maps
+      - name: Normalize team names across sources
+        run: python scripts/normalize_all_team_names.py
+
+      # Merge xG sources into hybrid (fills only where missing)
+      - name: Merge FBref xG fallback into hybrid
+        run: python scripts/merge_sd_fbref_into_xg.py
+
+      - name: Merge Understat xG into hybrid (fill missing only)
+        run: python scripts/merge_understat_into_xg.py
 
       - name: Merge StatsBomb xG into hybrid (fill missing only)
         run: python scripts/merge_statsbomb_into_xg.py
 
-      - name: Bootstrap team priors (optional)
-        run: python scripts/bootstrap_team_priors.py
+      # Seed priors (GK / set-piece / crowd)
+      - name: Build teams master (new 00 step)
+        run: python 00_build_teams_master.py
 
+      # Ensure minimal files exist
       - name: Ensure minimal data files exist
         run: python scripts/ensure_min_files.py
 
-      - name: Generate matchday templates (next 7 days)
+      # Generate matchday templates (next 7 days)
+      - name: Generate matchday injuries/lineups templates (next 7 days)
         run: python scripts/generate_matchday_templates.py
 
+      # 7-day enriched fixtures (with fallback to UPCOMING_fixtures.csv)
       - name: Build Upcoming 7-day window (enriched)
         run: python scripts/build_upcoming_window.py
 
-      - name: Enrich features (normalize + merge xG/injuries/lineups/refs/stadium + SB team features)
+      # Enrichment (your new 01 step) and legacy enrichment (kept if 01 expects it)
+      - name: Enrich fixtures (new 01 step)
+        run: python 01_enrich_fixtures.py
+
+      - name: Enrich features (normalize + merge injuries/refs/stadium + SB extras)
         run: python scripts/enrich_features.py
 
+      # Final HIST & UPCOMING model schema
       - name: Build HIST & UPCOMING
         run: python scripts/build_hist_and_upcoming.py
 
-      - name: Data inventory report (what we have)
+      # Reports (your new 03/04) + our diagnostics
+      - name: Emit quality report (new 03 step)
+        run: python 03_emit_quality_report.py
+
+      - name: Check inventory (new 04 step)
+        run: python 04_check_inventory.py
+
+      - name: Data inventory report (compat)
         run: python scripts/data_inventory_report.py
 
-      - name: Data quality diagnostics (coverage)
+      - name: Data quality diagnostics (compat)
         run: python scripts/data_quality_diagnostics.py
 
       - name: Build league xG table
         run: python scripts/derive_league_table_metrics.py
 
+      # Rolling form + learned blend + calibration (your new 02 replaces ours)
       - name: Build rolling form features
         run: python scripts/build_rolling_features.py
 
-      - name: Train calibrated blend
-        run: python scripts/train_calibrated_blend.py
+      - name: Blend and calibrate (new 02 step)
+        run: python 02_blend_and_calibrate.py
 
-      - name: Generate 7-day predictions (optional)
+      # Predictions
+      - name: Generate 7-day predictions
         run: python scripts/model_predict.py
 
       - name: Upload artifacts
