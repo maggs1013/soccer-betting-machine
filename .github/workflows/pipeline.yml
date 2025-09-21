@@ -52,6 +52,14 @@ jobs:
       - name: Merge FBref xG fallback into hybrid
         run: python scripts/merge_sd_fbref_into_xg.py
 
+      # --- NEW UNDERSTAT STEPS (fill Big-5 xG when FBR/FBref are missing) ---
+      - name: Fetch Understat xG (Big-5)
+        run: python scripts/fetch_understat_xg.py
+
+      - name: Merge Understat xG into hybrid (fill missing only)
+        run: python scripts/merge_understat_into_xg.py
+      # -----------------------------------------------------------------------
+
       - name: Bootstrap team priors (optional)
         run: python scripts/bootstrap_team_priors.py
 
@@ -73,10 +81,8 @@ jobs:
       - name: Data inventory report (what we have)
         run: python scripts/data_inventory_report.py
 
-      # >>> NEW STEP (3) — Data Quality Diagnostics
       - name: Data quality diagnostics (coverage)
         run: python scripts/data_quality_diagnostics.py
-      # <<<
 
       - name: Generate 7-day predictions (optional)
         run: python scripts/model_predict.py
@@ -94,6 +100,7 @@ jobs:
             data/xg_metrics_current.csv
             data/xg_metrics_last.csv
             data/xg_metrics_hybrid.csv
+            data/xg_understat.csv
             data/sd_fbref_team_stats.csv
             data/sd_538_spi.csv
             data/teams_master.csv
