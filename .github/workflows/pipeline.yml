@@ -30,7 +30,6 @@ jobs:
           THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
         run: python scripts/test_endpoints.py
 
-      # --- your existing data fetch steps (keep them) ---
       - name: Fetch Football-Data (historical)
         run: python scripts/fetch_football_data.py
 
@@ -50,6 +49,9 @@ jobs:
       - name: Fetch via soccerdata (FBref + 538)
         run: python scripts/fetch_soccerdata.py
 
+      - name: Normalize team names across sources
+        run: python scripts/normalize_all_team_names.py
+
       - name: Merge FBref xG fallback into hybrid
         run: python scripts/merge_sd_fbref_into_xg.py
 
@@ -64,7 +66,6 @@ jobs:
 
       - name: Merge StatsBomb xG into hybrid (fill missing only)
         run: python scripts/merge_statsbomb_into_xg.py
-      # --------------------------------------------------
 
       - name: Bootstrap team priors (optional)
         run: python scripts/bootstrap_team_priors.py
@@ -93,13 +94,11 @@ jobs:
       - name: Build league xG table
         run: python scripts/derive_league_table_metrics.py
 
-      # --- NEW ML STEPS ---
       - name: Build rolling form features
         run: python scripts/build_rolling_features.py
 
       - name: Train calibrated blend
         run: python scripts/train_calibrated_blend.py
-      # ---------------------
 
       - name: Generate 7-day predictions (optional)
         run: python scripts/model_predict.py
