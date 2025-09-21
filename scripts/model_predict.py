@@ -1,7 +1,6 @@
 # scripts/model_predict.py
-# Predict next-7-day matches using learned market↔model blend and isotonic calibration.
-# Inputs: data/UPCOMING_7D_enriched.csv, data/model_blend.json, data/calibrator.pkl
-# Output: data/PREDICTIONS_7D.csv
+# Predict next-7-day matches using learned blend + calibration.
+# Works without odds: outputs pH/pD/pA; Kelly columns set to 0 when odds missing.
 
 import os, json, pickle, numpy as np, pandas as pd
 
@@ -39,54 +38,47 @@ def load_cal(p):
 
 def main():
     if not os.path.exists(UP):
-        pd.DataFrame(columns=["date","home_team","away_team","pH","pD","pA",
-                              "kelly_H","kelly_D","kelly_A"]).to_csv(OUT,index=False)
+        pd.DataFrame(columns=["date","home_team","away_team","pH","pD","pA","kelly_H","kelly_D","kelly_A"]).to_csv(OUT,index=False)
         print("[WARN] Upcoming file missing; wrote header-only preds.")
         return
 
     df = pd.read_csv(UP)
     if df.empty:
-        pd.DataFrame(columns=["date","home_team","away_team","pH","pD","pA",
-                              "kelly_H","kelly_D","kelly_A"]).to_csv(OUT,index=False)
+        pd.DataFrame(columns=["date","home_team","away_team","pH","pD","pA","kelly_H","kelly_D","kelly_A"]).to_csv(OUT,index=False)
         print("[WARN] Upcoming empty; wrote header-only preds.")
         return
 
-    # Market probs from manual odds if present
-    mH = df["home_odds_dec"].map(implied) if "home_odds_dec" in df.columns else pd.Series(np.nan, index=df.index)
-    mD = df["draw_odds_dec"].map(implied) if "draw_odds_dec" in df.columns else pd.Series(np.nan, index=df.index)
-    mA = df["away_odds_dec"].map(implied) if "away_odds_dec" in df.columns else pd.Series(np.nan, index=df.index)
-    market = pd.DataFrame([strip_vig(h,d,a) for h,d,a in zip(mH,mD,mA)], columns=["mH","mD","mA"])
+    # Market probs from API odds if present
+    if {"home_odds_dec","draw_odds_dec","away_odds_dec"}.issubset(df.columns):
+        mH = df["home_odds_dec"].map(implied); mD = df["draw_odds_dec"].map(implied); mA = df["away_odds_dec"].map(implied)
+        m = pd.DataFrame([strip_vig(h,d,a) for h,d,a in zip(mH,mD,mA)], columns=["mH","mD","mA"])
+    else:
+        m = pd.DataFrame({"mH":np.nan,"mD":np.nan,"mA":np.nan}, index=df.index)
 
-    # Model probs via Elo (use priors if available)
-    elo_h = pd.Series(1500.0, index=df.index); elo_a = pd.Series(1500.0, index=df.index)
-    if "elo_home" in df.columns: elo_h = df["elo_home"].fillna(1500.0)
-    if "elo_away" in df.columns: elo_a = df["elo_away"].fillna(1500.0)
+    # Model (Elo) probs — use priors if present in enriched file
+    elo_h = df.get("elo_home", pd.Series(1500.0, index=df.index)).fillna(1500.0)
+    elo_a = df.get("elo_away", pd.Series(1500.0, index=df.index)).fillna(1500.0)
     model = df.apply(lambda r: elo_prob(elo_h.loc[r.name], elo_a.loc[r.name]), axis=1, result_type="expand")
     model.columns = ["eH","eD","eA"]
 
-    X = pd.concat([df[["date","home_team","away_team"]], market, model], axis=1)
-
-    # Load blend and calibrator
-    w_market = load_json(BL, {"w_market":0.70})["w_market"]
+    # Blend + calibration
+    w_market = load_json(BL, {"w_market":0.85})["w_market"]
     cal = load_cal(CAL)
 
-    # Blend
-    pH = w_market*X["mH"].fillna(X["eH"]) + (1-w_market)*X["eH"]
-    pD = w_market*X["mD"].fillna(X["eD"]) + (1-w_market)*X["eD"]
-    pA = w_market*X["mA"].fillna(X["eA"]) + (1-w_market)*X["eA"]
+    pH = w_market*m["mH"].fillna(model["eH"]) + (1-w_market)*model["eH"]
+    pD = w_market*m["mD"].fillna(model["eD"]) + (1-w_market)*model["eD"]
+    pA = w_market*m["mA"].fillna(model["eA"]) + (1-w_market)*model["eA"]
     s = pH+pD+pA; pH/=s; pD/=s; pA/=s
 
-    # Calibrate one-vs-rest if available
     if cal.get("home") is not None:
         pH = pd.Series(cal["home"].transform(pH), index=pH.index)
     if cal.get("draw") is not None:
         pD = pd.Series(cal["draw"].transform(pD), index=pD.index)
     if cal.get("away") is not None:
         pA = pd.Series(cal["away"].transform(pA), index=pA.index)
-    # renormalize tiny drift
     s = pH+pD+pA; pH/=s; pD/=s; pA/=s
 
-    # Kelly
+    # Kelly stakes = 0 if odds are missing
     def kelly(p, dec, cap=0.10):
         try:
             b=float(dec)-1.0
@@ -104,7 +96,7 @@ def main():
         "pH": pH, "pD": pD, "pA": pA,
         "kelly_H": kH, "kelly_D": kD, "kelly_A": kA
     })
-    out.sort_values(["date","kelly_H","kelly_D","kelly_A"], ascending=[True, False, False, False], inplace=True)
+    out.sort_values(["date","pH","pD","pA"], ascending=[True, False, False, False], inplace=True)
     out.to_csv(OUT, index=False)
     print(f"[OK] wrote {OUT} rows={len(out)}")
 
