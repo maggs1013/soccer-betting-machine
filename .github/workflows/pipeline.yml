@@ -30,6 +30,7 @@ jobs:
           THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
         run: python scripts/test_endpoints.py
 
+      # --- your existing data fetch steps (keep them) ---
       - name: Fetch Football-Data (historical)
         run: python scripts/fetch_football_data.py
 
@@ -43,7 +44,7 @@ jobs:
 
       - name: Fetch FBR team xG (hybrid)
         env:
-          FBR_API_KEY: ${{ secrets/FBR_API_KEY }}
+          FBR_API_KEY: ${{ secrets.FBR_API_KEY }}
         run: python scripts/fetch_fbr_team_xg.py
 
       - name: Fetch via soccerdata (FBref + 538)
@@ -52,19 +53,18 @@ jobs:
       - name: Merge FBref xG fallback into hybrid
         run: python scripts/merge_sd_fbref_into_xg.py
 
-      # --- Understat (Big-5) ---
       - name: Fetch Understat xG (Big-5)
         run: python scripts/fetch_understat_xg.py
 
       - name: Merge Understat xG into hybrid (fill missing only)
         run: python scripts/merge_understat_into_xg.py
 
-      # --- StatsBomb Open Data ---
       - name: Fetch StatsBomb xG (open data)
         run: python scripts/fetch_statsbomb_xg.py
 
       - name: Merge StatsBomb xG into hybrid (fill missing only)
         run: python scripts/merge_statsbomb_into_xg.py
+      # --------------------------------------------------
 
       - name: Bootstrap team priors (optional)
         run: python scripts/bootstrap_team_priors.py
@@ -93,6 +93,14 @@ jobs:
       - name: Build league xG table
         run: python scripts/derive_league_table_metrics.py
 
+      # --- NEW ML STEPS ---
+      - name: Build rolling form features
+        run: python scripts/build_rolling_features.py
+
+      - name: Train calibrated blend
+        run: python scripts/train_calibrated_blend.py
+      # ---------------------
+
       - name: Generate 7-day predictions (optional)
         run: python scripts/model_predict.py
 
@@ -108,6 +116,9 @@ jobs:
             data/DATA_INVENTORY_REPORT.csv
             data/DATA_QUALITY_REPORT.csv
             data/LEAGUE_XG_TABLE.csv
+            data/team_form_features.csv
+            data/model_blend.json
+            data/calibrator.pkl
             data/xg_metrics_current.csv
             data/xg_metrics_last.csv
             data/xg_metrics_hybrid.csv
