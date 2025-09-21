@@ -8,6 +8,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -23,7 +24,7 @@ jobs:
       - name: Install requirements
         run: pip install -r requirements.txt
 
-      - name: Probe APIs
+      - name: Probe APIs (FBR / Odds API)
         env:
           FBR_API_KEY: ${{ secrets.FBR_API_KEY }}
           THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
@@ -32,7 +33,7 @@ jobs:
       - name: Fetch Football-Data (historical)
         run: python scripts/fetch_football_data.py
 
-      - name: Consolidate odds (optional)
+      - name: Consolidate odds (optional; builds data/manual_odds.csv)
         run: python scripts/consolidate_odds.py
 
       - name: Fetch Odds (API or manual override)
@@ -45,10 +46,10 @@ jobs:
           FBR_API_KEY: ${{ secrets.FBR_API_KEY }}
         run: python scripts/fetch_fbr_team_xg.py
 
-      - name: Fetch via soccerdata
+      - name: Fetch via soccerdata (FBref + 538)
         run: python scripts/fetch_soccerdata.py
 
-      - name: Merge FBref xG fallback
+      - name: Merge FBref xG fallback into hybrid
         run: python scripts/merge_sd_fbref_into_xg.py
 
       - name: Bootstrap team priors (optional)
@@ -63,14 +64,19 @@ jobs:
       - name: Build Upcoming 7-day window (enriched)
         run: python scripts/build_upcoming_window.py
 
-      - name: Enrich features
+      - name: Enrich features (normalize + merge xG/injuries/lineups/refs/stadium)
         run: python scripts/enrich_features.py
 
       - name: Build HIST & UPCOMING
         run: python scripts/build_hist_and_upcoming.py
 
-      - name: Data inventory report
+      - name: Data inventory report (what we have)
         run: python scripts/data_inventory_report.py
+
+      # >>> NEW STEP (3) — Data Quality Diagnostics
+      - name: Data quality diagnostics (coverage)
+        run: python scripts/data_quality_diagnostics.py
+      # <<<
 
       - name: Generate 7-day predictions (optional)
         run: python scripts/model_predict.py
@@ -84,9 +90,12 @@ jobs:
             data/UPCOMING_fixtures.csv
             data/UPCOMING_7D_enriched.csv
             data/PREDICTIONS_7D.csv
+            data/DATA_QUALITY_REPORT.csv
             data/xg_metrics_current.csv
             data/xg_metrics_last.csv
             data/xg_metrics_hybrid.csv
+            data/sd_fbref_team_stats.csv
+            data/sd_538_spi.csv
             data/teams_master.csv
             data/api_probe_report.json
             data/manual_odds.csv
