@@ -52,13 +52,17 @@ jobs:
       - name: Merge FBref xG fallback into hybrid
         run: python scripts/merge_sd_fbref_into_xg.py
 
-      # --- NEW UNDERSTAT STEPS (fill Big-5 xG when FBR/FBref are missing) ---
       - name: Fetch Understat xG (Big-5)
         run: python scripts/fetch_understat_xg.py
 
       - name: Merge Understat xG into hybrid (fill missing only)
         run: python scripts/merge_understat_into_xg.py
-      # -----------------------------------------------------------------------
+
+      - name: Fetch StatsBomb xG (open data)
+        run: python scripts/fetch_statsbomb_xg.py
+
+      - name: Merge StatsBomb xG into hybrid (fill missing only)
+        run: python scripts/merge_statsbomb_into_xg.py
 
       - name: Bootstrap team priors (optional)
         run: python scripts/bootstrap_team_priors.py
@@ -96,11 +100,13 @@ jobs:
             data/UPCOMING_fixtures.csv
             data/UPCOMING_7D_enriched.csv
             data/PREDICTIONS_7D.csv
+            data/DATA_INVENTORY_REPORT.csv
             data/DATA_QUALITY_REPORT.csv
             data/xg_metrics_current.csv
             data/xg_metrics_last.csv
             data/xg_metrics_hybrid.csv
             data/xg_understat.csv
+            data/xg_statsbomb.csv
             data/sd_fbref_team_stats.csv
             data/sd_538_spi.csv
             data/teams_master.csv
