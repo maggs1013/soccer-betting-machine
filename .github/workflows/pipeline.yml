@@ -43,7 +43,7 @@ jobs:
 
       - name: Fetch FBR team xG (hybrid)
         env:
-          FBR_API_KEY: ${{ secrets.FBR_API_KEY }}
+          FBR_API_KEY: ${{ secrets/FBR_API_KEY }}
         run: python scripts/fetch_fbr_team_xg.py
 
       - name: Fetch via soccerdata (FBref + 538)
@@ -52,12 +52,14 @@ jobs:
       - name: Merge FBref xG fallback into hybrid
         run: python scripts/merge_sd_fbref_into_xg.py
 
+      # --- Understat (Big-5) ---
       - name: Fetch Understat xG (Big-5)
         run: python scripts/fetch_understat_xg.py
 
       - name: Merge Understat xG into hybrid (fill missing only)
         run: python scripts/merge_understat_into_xg.py
 
+      # --- StatsBomb Open Data ---
       - name: Fetch StatsBomb xG (open data)
         run: python scripts/fetch_statsbomb_xg.py
 
@@ -76,7 +78,7 @@ jobs:
       - name: Build Upcoming 7-day window (enriched)
         run: python scripts/build_upcoming_window.py
 
-      - name: Enrich features (normalize + merge xG/injuries/lineups/refs/stadium)
+      - name: Enrich features (normalize + merge xG/injuries/lineups/refs/stadium + SB team features)
         run: python scripts/enrich_features.py
 
       - name: Build HIST & UPCOMING
@@ -87,6 +89,9 @@ jobs:
 
       - name: Data quality diagnostics (coverage)
         run: python scripts/data_quality_diagnostics.py
+
+      - name: Build league xG table
+        run: python scripts/derive_league_table_metrics.py
 
       - name: Generate 7-day predictions (optional)
         run: python scripts/model_predict.py
@@ -102,11 +107,13 @@ jobs:
             data/PREDICTIONS_7D.csv
             data/DATA_INVENTORY_REPORT.csv
             data/DATA_QUALITY_REPORT.csv
+            data/LEAGUE_XG_TABLE.csv
             data/xg_metrics_current.csv
             data/xg_metrics_last.csv
             data/xg_metrics_hybrid.csv
             data/xg_understat.csv
             data/xg_statsbomb.csv
+            data/team_statsbomb_features.csv
             data/sd_fbref_team_stats.csv
             data/sd_538_spi.csv
             data/teams_master.csv
