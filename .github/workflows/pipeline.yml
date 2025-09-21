@@ -37,7 +37,7 @@ jobs:
       - name: Fetch Football-Data (historical)
         run: python scripts/fetch_football_data.py
 
-      # Odds strictly from API now (no manual override)
+      # Odds via API only (no manual override)
       - name: Fetch Odds (Odds API only)
         env:
           THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
@@ -77,7 +77,7 @@ jobs:
       - name: Generate matchday injuries/lineups templates (next 7 days)
         run: python scripts/generate_matchday_templates.py
 
-      # 7-day window (API fixtures fallback baked in)
+      # 7-day window (with fixtures fallback baked in)
       - name: Build Upcoming 7-day window (enriched)
         run: python scripts/build_upcoming_window.py
 
@@ -118,7 +118,7 @@ jobs:
       - name: Generate 7-day predictions (no-manual-odds mode)
         run: python scripts/model_predict.py
 
-      # --- NEW: #4 Evaluation & Actionability ---
+      # Evaluation & Actionability
       - name: Backtest evaluate
         run: python scripts/backtest_evaluate.py
 
@@ -127,7 +127,10 @@ jobs:
 
       - name: Actionability report
         run: python scripts/actionability_report.py
-      # -----------------------------------------
+
+      # Council Briefing (Markdown)
+      - name: Council Briefing
+        run: python scripts/council_briefing.py
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -149,6 +152,7 @@ jobs:
             data/CALIBRATION_TABLE.csv
             data/CALIBRATION_SUMMARY.csv
             data/ACTIONABILITY_REPORT.csv
+            data/COUNCIL_BRIEFING.md
             data/xg_metrics_current.csv
             data/xg_metrics_last.csv
             data/xg_metrics_hybrid.csv
