@@ -1,62 +1,112 @@
 # scripts/model_predict.py
-# Simple, robust predictor using available odds.
-# Avoids column mismatch errors.
+# Predict next-7-day matches using learned market↔model blend and isotonic calibration.
+# Inputs: data/UPCOMING_7D_enriched.csv, data/model_blend.json, data/calibrator.pkl
+# Output: data/PREDICTIONS_7D.csv
 
-import os
-import pandas as pd
-import numpy as np
+import os, json, pickle, numpy as np, pandas as pd
 
-DATA = "data"
-UPCOMING = os.path.join(DATA, "UPCOMING_7D_enriched.csv")
-OUT = os.path.join(DATA, "PREDICTIONS_7D.csv")
+DATA="data"
+UP  = os.path.join(DATA,"UPCOMING_7D_enriched.csv")
+BL  = os.path.join(DATA,"model_blend.json")
+CAL = os.path.join(DATA,"calibrator.pkl")
+OUT = os.path.join(DATA,"PREDICTIONS_7D.csv")
+
+def implied(d):
+    try: d=float(d); return 1.0/d if d>0 else np.nan
+    except: return np.nan
+
+def strip_vig(ph,pd,pa):
+    s = ph+pd+pa
+    if not np.isfinite(s) or s<=0: return (np.nan,np.nan,np.nan)
+    return (ph/s,pd/s,pa/s)
+
+def elo_prob(elo_h, elo_a, ha=60.0):
+    pH_core = 1/(1+10**(-((elo_h - elo_a + ha)/400)))
+    pD = 0.18 + 0.10*np.exp(-abs(elo_h - elo_a)/200.0)
+    pH = (1-pD)*pH_core
+    pA = 1 - pH - pD
+    return max(1e-6,min(1-1e-6,pH)), max(1e-6,min(1-1e-6,pD)), max(1e-6,min(1-1e-6,pA))
+
+def load_json(p, default):
+    try:
+        with open(p,"r") as f: return json.load(f)
+    except: return default
+
+def load_cal(p):
+    try:
+        with open(p,"rb") as f: return pickle.load(f)
+    except: return {"home":None,"draw":None,"away":None}
 
 def main():
-    if not os.path.exists(UPCOMING):
-        print("[INFO] No upcoming file; writing empty predictions.")
-        pd.DataFrame(columns=["date","home_team","away_team","pred_home","pred_draw","pred_away","kelly_home","kelly_draw","kelly_away"]).to_csv(OUT, index=False)
+    if not os.path.exists(UP):
+        pd.DataFrame(columns=["date","home_team","away_team","pH","pD","pA",
+                              "kelly_H","kelly_D","kelly_A"]).to_csv(OUT,index=False)
+        print("[WARN] Upcoming file missing; wrote header-only preds.")
         return
 
-    up = pd.read_csv(UPCOMING)
-    if up.empty:
-        print("[INFO] UPCOMING file empty; writing header-only predictions.")
-        pd.DataFrame(columns=["date","home_team","away_team","pred_home","pred_draw","pred_away","kelly_home","kelly_draw","kelly_away"]).to_csv(OUT, index=False)
+    df = pd.read_csv(UP)
+    if df.empty:
+        pd.DataFrame(columns=["date","home_team","away_team","pH","pD","pA",
+                              "kelly_H","kelly_D","kelly_A"]).to_csv(OUT,index=False)
+        print("[WARN] Upcoming empty; wrote header-only preds.")
         return
 
-    # Ensure required columns
-    need = {"date","home_team","away_team","home_odds_dec","draw_odds_dec","away_odds_dec"}
-    for c in need:
-        if c not in up.columns:
-            up[c] = np.nan
+    # Market probs from manual odds if present
+    mH = df["home_odds_dec"].map(implied) if "home_odds_dec" in df.columns else pd.Series(np.nan, index=df.index)
+    mD = df["draw_odds_dec"].map(implied) if "draw_odds_dec" in df.columns else pd.Series(np.nan, index=df.index)
+    mA = df["away_odds_dec"].map(implied) if "away_odds_dec" in df.columns else pd.Series(np.nan, index=df.index)
+    market = pd.DataFrame([strip_vig(h,d,a) for h,d,a in zip(mH,mD,mA)], columns=["mH","mD","mA"])
 
-    # Convert odds to probabilities
-    preds = []
-    for _, r in up.iterrows():
+    # Model probs via Elo (use priors if available)
+    elo_h = pd.Series(1500.0, index=df.index); elo_a = pd.Series(1500.0, index=df.index)
+    if "elo_home" in df.columns: elo_h = df["elo_home"].fillna(1500.0)
+    if "elo_away" in df.columns: elo_a = df["elo_away"].fillna(1500.0)
+    model = df.apply(lambda r: elo_prob(elo_h.loc[r.name], elo_a.loc[r.name]), axis=1, result_type="expand")
+    model.columns = ["eH","eD","eA"]
+
+    X = pd.concat([df[["date","home_team","away_team"]], market, model], axis=1)
+
+    # Load blend and calibrator
+    w_market = load_json(BL, {"w_market":0.70})["w_market"]
+    cal = load_cal(CAL)
+
+    # Blend
+    pH = w_market*X["mH"].fillna(X["eH"]) + (1-w_market)*X["eH"]
+    pD = w_market*X["mD"].fillna(X["eD"]) + (1-w_market)*X["eD"]
+    pA = w_market*X["mA"].fillna(X["eA"]) + (1-w_market)*X["eA"]
+    s = pH+pD+pA; pH/=s; pD/=s; pA/=s
+
+    # Calibrate one-vs-rest if available
+    if cal.get("home") is not None:
+        pH = pd.Series(cal["home"].transform(pH), index=pH.index)
+    if cal.get("draw") is not None:
+        pD = pd.Series(cal["draw"].transform(pD), index=pD.index)
+    if cal.get("away") is not None:
+        pA = pd.Series(cal["away"].transform(pA), index=pA.index)
+    # renormalize tiny drift
+    s = pH+pD+pA; pH/=s; pD/=s; pA/=s
+
+    # Kelly
+    def kelly(p, dec, cap=0.10):
         try:
-            h, d, a = r["home_odds_dec"], r["draw_odds_dec"], r["away_odds_dec"]
-            if pd.isna(h) or pd.isna(d) or pd.isna(a):
-                preds.append((np.nan,np.nan,np.nan))
-                continue
-            inv = 1/float(h) + 1/float(d) + 1/float(a)
-            ph, pd_, pa = (1/float(h))/inv, (1/float(d))/inv, (1/float(a))/inv
-            preds.append((ph,pd_,pa))
-        except Exception:
-            preds.append((np.nan,np.nan,np.nan))
+            b=float(dec)-1.0
+            if b<=0 or not np.isfinite(p): return 0.0
+            q=1-p; k=(b*p - q)/b
+            return float(max(0.0, min(k, cap)))
+        except: return 0.0
 
-    up["pred_home"], up["pred_draw"], up["pred_away"] = zip(*preds)
+    kH = [kelly(h, o) for h,o in zip(pH, df.get("home_odds_dec", pd.Series(np.nan, index=df.index)))]
+    kD = [kelly(d, o) for d,o in zip(pD, df.get("draw_odds_dec", pd.Series(np.nan, index=df.index)))]
+    kA = [kelly(a, o) for a,o in zip(pA, df.get("away_odds_dec", pd.Series(np.nan, index=df.index)))]
 
-    # Kelly criterion (simple version: 1x bankroll, fair odds assumption)
-    def kelly(p, odds):
-        if pd.isna(p) or pd.isna(odds): return 0.0
-        b = float(odds) - 1.0
-        return max((p*(b+1) - 1)/b, 0.0)
-
-    up["kelly_home"] = [kelly(ph, o) for ph,o in zip(up["pred_home"], up["home_odds_dec"])]
-    up["kelly_draw"] = [kelly(pd_, o) for pd_,o in zip(up["pred_draw"], up["draw_odds_dec"])]
-    up["kelly_away"] = [kelly(pa, o) for pa,o in zip(up["pred_away"], up["away_odds_dec"])]
-
-    keep = ["date","home_team","away_team","pred_home","pred_draw","pred_away","kelly_home","kelly_draw","kelly_away"]
-    up[keep].to_csv(OUT, index=False)
-    print(f"[OK] wrote {OUT} with {len(up)} rows")
+    out = pd.DataFrame({
+        "date": df.get("date"), "home_team": df.get("home_team"), "away_team": df.get("away_team"),
+        "pH": pH, "pD": pD, "pA": pA,
+        "kelly_H": kH, "kelly_D": kD, "kelly_A": kA
+    })
+    out.sort_values(["date","kelly_H","kelly_D","kelly_A"], ascending=[True, False, False, False], inplace=True)
+    out.to_csv(OUT, index=False)
+    print(f"[OK] wrote {OUT} rows={len(out)}")
 
 if __name__ == "__main__":
     main()
