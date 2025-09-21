@@ -4,3 +4,4 @@ python-dateutil
 soccerdata
 aiohttp
 understat
+statsbombpy
