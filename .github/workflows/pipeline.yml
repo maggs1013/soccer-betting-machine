@@ -8,8 +8,11 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      TZ: UTC
 
     steps:
+      # ---------- Checkout & Python ----------
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -22,10 +25,21 @@ jobs:
         run: python -m pip install --upgrade pip
 
       - name: Install requirements
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
+          pip install joblib
 
       - name: Set PYTHONPATH (enable util_* imports)
         run: echo "PYTHONPATH=$GITHUB_WORKSPACE:$GITHUB_WORKSPACE/scripts" >> $GITHUB_ENV
+
+      # ---------- Date scaffold (daily run dir under runs/YYYY-MM-DD) ----------
+      - name: Prepare run directory
+        id: datestamp
+        run: |
+          export RUN_DATE=$(date -u +%F)
+          echo "RUN_DATE=$RUN_DATE" >> $GITHUB_ENV
+          mkdir -p runs/$RUN_DATE
+          mkdir -p data
 
       # ---------- Probes ----------
       - name: Probe APIs (FBR / Odds API)
@@ -54,7 +68,11 @@ jobs:
       - name: Fetch StatsBomb xG (open data)
         run: python scripts/fetch_statsbomb_xg.py
 
-      # ---------- Normalize names across sources (main map + overrides) ----------
+      # ---------- Optional: multi-book scrape for dispersion ----------
+      - name: Scrape OddsPortal (optional secondary odds)
+        run: python scripts/scrape_oddsportal.py || true
+
+      # ---------- Normalize names across sources ----------
       - name: Normalize team names across sources
         run: python scripts/normalize_all_team_names.py
 
@@ -82,18 +100,18 @@ jobs:
       - name: Build Upcoming 7-day window (enriched)
         run: python scripts/build_upcoming_window.py
 
-      # ---------- Enrichment (custom + legacy safe pass) ----------
+      # ---------- Enrichment ----------
       - name: Enrich fixtures (01 step)
         run: python scripts/01_enrich_fixtures.py
 
-      - name: Enrich features (normalize + merge injuries/refs/stadium + SB team features)
+      - name: Enrich features (merge injuries/refs/stadium + SB team features)
         run: python scripts/enrich_features.py
 
       # ---------- Final modeling schema ----------
       - name: Build HIST & UPCOMING
         run: python scripts/build_hist_and_upcoming.py
 
-      # ---------- Operational reports ----------
+      # ---------- Operational reports (legacy) ----------
       - name: Emit quality report (03 step)
         run: python scripts/03_emit_quality_report.py
 
@@ -119,7 +137,7 @@ jobs:
       - name: Build rolling form features
         run: python scripts/build_rolling_features.py
 
-      - name: Train feature model
+      - name: Train feature model (1X2)
         run: python scripts/train_feature_model.py
 
       - name: Predict feature-model probabilities (upcoming)
@@ -128,9 +146,33 @@ jobs:
       - name: Blend and calibrate (02 step)
         run: python scripts/02_blend_and_calibrate.py
 
-      # ---------- Predictions (probabilities always; Kelly only if odds present) ----------
-      - name: Generate 7-day predictions
+      # ---------- Predictions (1X2 baseline) ----------
+      - name: Generate 7-day predictions (1X2)
         run: python scripts/model_predict.py
+
+      # ---------- New: Goals μ and Totals 2.5 pricing ----------
+      - name: Goals model (μ_home, μ_away)
+        run: python scripts/goals_model.py
+
+      - name: Totals pricing (main line 2.5)
+        run: python scripts/totals_pricing.py
+
+      # ---------- New: BTTS v1 ----------
+      - name: Train BTTS model (per-league)
+        run: python scripts/train_btts_model.py
+
+      - name: Predict BTTS (blend + isotonic per-league)
+        run: python scripts/predict_btts_model.py
+
+      # ---------- New: Consistency checks & risk ----------
+      - name: Consistency checks (1X2 ↔ Totals ↔ BTTS ↔ Spread)
+        run: python scripts/consistency_checks.py
+
+      - name: Kelly sizing & exposure caps
+        run: python scripts/kelly_and_caps.py
+
+      - name: Execution feasibility (liquidity/coverage)
+        run: python scripts/execution_feasibility.py
 
       # ---------- Evaluation & Council Briefing ----------
       - name: Backtest evaluate
@@ -139,17 +181,35 @@ jobs:
       - name: Calibration report
         run: python scripts/calibration_report.py
 
-      - name: Actionability report
-        run: python scripts/actionability_report.py
+      - name: Feature importance (explainability)
+        run: python scripts/feature_importance.py
 
-      - name: Council Briefing
+      - name: ROI by slice (weekly)
+        run: python scripts/roi_by_slice.py
+
+      - name: Coverage trends
+        run: python scripts/coverage_trends.py
+
+      - name: Feature drift (weekly)
+        run: python scripts/feature_drift.py
+
+      - name: Line move log (AM vs T-60)
+        run: python scripts/line_move_log.py
+
+      - name: Stacking log (BTTS meta-weights placeholder)
+        run: python scripts/stacking_log.py
+
+      - name: Council Briefing (expanded)
         run: python scripts/council_briefing.py
 
-      # ---------- Ship bundle ----------
-      - name: Upload artifacts
+      # ---------- Ship bundles (legacy + new) ----------
+      - name: Export sbm-7d-bundle (new consolidated zip)
+        run: python scripts/export_artifacts.py
+
+      - name: Upload legacy artifact set (compatibility)
         uses: actions/upload-artifact@v4
         with:
-          name: sbm-7d-bundle
+          name: sbm-legacy-artifacts
           path: |
             data/HIST_matches.csv
             data/UPCOMING_fixtures.csv
@@ -182,3 +242,9 @@ jobs:
             data/sd_538_spi.csv
             data/teams_master.csv
             data/api_probe_report.json
+
+      - name: Upload new zipped bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbm-7d-bundle
+          path: runs/${{ env.RUN_DATE }}/sbm-7d-bundle.zip
