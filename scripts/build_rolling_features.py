@@ -1,81 +1,122 @@
-# scripts/build_rolling_features.py
-# Build team rolling form features from HIST_matches.csv:
-#   last5/last10: points_per_game, goal_diff_per_game, xg_for_per_game, xg_against_per_game
-# Output: data/team_form_features.csv
+#!/usr/bin/env python3
+"""
+build_rolling_features.py  —  robust team-form builder
 
-import os, pandas as pd, numpy as np
+Purpose
+-------
+Compute rolling form features from historical matches per team, safely:
+  • last5_ppg, last10_ppg
+  • last5_gdpg, last10_gdpg
+  • last5_xgpg / xgapg, last10_xgpg / xgapg (if xG fields exist; else NaN)
+
+Inputs (data/):
+  HIST_matches.csv   (date, home_team, away_team, home_goals, away_goals, optional xg columns)
+
+Output (data/):
+  team_form_features.csv
+"""
+
+import os
+import numpy as np
+import pandas as pd
 
 DATA = "data"
-IN_H = os.path.join(DATA, "HIST_matches.csv")
+HIST = os.path.join(DATA, "HIST_matches.csv")
 OUT  = os.path.join(DATA, "team_form_features.csv")
 
-def safe_read(p):
-    return pd.read_csv(p) if os.path.exists(p) else pd.DataFrame()
+def safe_read(path):
+    if not os.path.exists(path):
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(path)
+    except Exception:
+        return pd.DataFrame()
 
-def wdl_points(gf, ga):
-    if pd.isna(gf) or pd.isna(ga): return np.nan
-    if gf > ga: return 3
-    if gf == ga: return 1
-    return 0
+def to_long(df):
+    # Build long format: team, date, gf, ga, xg, xga, pts
+    need = {"date","home_team","away_team","home_goals","away_goals"}
+    if df.empty or not need.issubset(df.columns):
+        return pd.DataFrame(columns=["date","team","gf","ga","xg","xga","pts"])
+
+    d = df.copy()
+    d["date"] = pd.to_datetime(d["date"], errors="coerce")
+    d = d.dropna(subset=["date"]).sort_values("date")
+
+    # goals
+    h = d[["date","home_team","home_goals","away_goals"]].rename(
+        columns={"home_team":"team","home_goals":"gf","away_goals":"ga"}
+    )
+    a = d[["date","away_team","home_goals","away_goals"]].rename(
+        columns={"away_team":"team","home_goals":"ga","away_goals":"gf"}
+    )
+
+    # points
+    # home: win=3 if home_goals>away_goals else draw=1 else 0; away inverse
+    h["pts"] = np.where(d["home_goals"] > d["away_goals"], 3, np.where(d["home_goals"]==d["away_goals"], 1, 0))
+    a["pts"] = np.where(d["away_goals"] > d["home_goals"], 3, np.where(d["home_goals"]==d["away_goals"], 1, 0))
+
+    # optional xG
+    xg_cols = {"home_xg":"xg", "away_xg":"xg", "home_xga":"xga", "away_xga":"xga"}
+    # try common historical names too
+    for src, tgt in [("home_xg","xg"), ("away_xg","xg"), ("home_xga","xga"), ("away_xga","xga"),
+                     ("home_xg_total","xg"), ("away_xg_total","xg"),
+                     ("home_xga_total","xga"), ("away_xga_total","xga")]:
+        if src in d.columns:
+            # append to temp frames
+            if src.startswith("home_"):
+                h[tgt] = d[src]
+            else:
+                a[tgt] = d[src]
+
+    # ensure xg/xga exist
+    for col in ["xg","xga"]:
+        if col not in h.columns: h[col] = np.nan
+        if col not in a.columns: a[col] = np.nan
+
+    long = pd.concat([h, a], ignore_index=True)
+    long = long[["date","team","gf","ga","xg","xga","pts"]].sort_values(["team","date"])
+    return long
+
+def roll_feats(g):
+    # g is per-team sorted by date; compute rolling windows
+    g = g.copy().sort_values("date")
+    for n in (5, 10):
+        # points per game
+        g[f"last{n}_ppg"] = g["pts"].rolling(n, min_periods=1).mean()
+        # goal diff per game
+        g[f"last{n}_gdpg"] = (g["gf"] - g["ga"]).rolling(n, min_periods=1).mean()
+        # xg pg (if available)
+        g[f"last{n}_xgpg"]   = g["xg"].rolling(n, min_periods=1).mean()
+        g[f"last{n}_xgapg"]  = g["xga"].rolling(n, min_periods=1).mean()
+    return g
 
 def main():
-    hist = safe_read(IN_H)
-    if hist.empty or not {"date","home_team","away_team","home_goals","away_goals"}.issubset(hist.columns):
+    df = safe_read(HIST)
+    long = to_long(df)
+    if long.empty:
         pd.DataFrame(columns=[
             "team","last5_ppg","last5_gdpg","last5_xgpg","last5_xgapg",
             "last10_ppg","last10_gdpg","last10_xgpg","last10_xgapg"
         ]).to_csv(OUT, index=False)
-        print("[WARN] HIST empty or missing columns; wrote header-only form features.")
+        print(f"[WARN] {HIST} missing/empty; wrote empty {OUT}")
         return
 
-    # If xG per match isn’t present, approximate with gf/ga (fallback)
-    has_xg = {"home_xg","away_xg"}.issubset(hist.columns)
-    hist["date"] = pd.to_datetime(hist["date"], errors="coerce")
-
-    # Build stacked match list per team with derived stats
-    home = hist[["date","home_team","home_goals","away_goals"]].copy()
-    home["team"] = home["home_team"]; home["gf"] = home["home_goals"]; home["ga"] = home["away_goals"]
-    if has_xg:
-        home["xg_for"] = hist["home_xg"]; home["xg_against"] = hist["away_xg"]
-    else:
-        home["xg_for"] = home["gf"]; home["xg_against"] = home["ga"]
-    away = hist[["date","away_team","home_goals","away_goals"]].copy()
-    away["team"] = away["away_team"]; away["gf"] = away["away_goals"]; away["ga"] = away["home_goals"]
-    if has_xg:
-        away["xg_for"] = hist["away_xg"]; away["xg_against"] = hist["home_xg"]
-    else:
-        away["xg_for"] = away["gf"]; away["xg_against"] = away["ga"]
-
-    stack = pd.concat([home[["date","team","gf","ga","xg_for","xg_against"]],
-                       away[["date","team","gf","ga","xg_for","xg_against"]]], ignore_index=True)
-    stack.sort_values(["team","date"], inplace=True)
-    stack["pts"] = [wdl_points(r.gf, r.ga) for r in stack.itertuples(index=False)]
-
-    # Rolling windows per team
-    feats = []
-    for team, df in stack.groupby("team"):
-        df = df.dropna(subset=["date"]).sort_values("date")
-        for w in (5,10):
-            ppg  = df["pts"].rolling(w).mean()
-            gdpg = (df["gf"] - df["ga"]).rolling(w).mean()
-            xgpg = df["xg_for"].rolling(w).mean()
-            xgapg= df["xg_against"].rolling(w).mean()
-            df[f"last{w}_ppg"]  = ppg
-            df[f"last{w}_gdpg"] = gdpg
-            df[f"last{w}_xgpg"] = xgpg
-            df[f"last{w}_xgapg"]= xgapg
-        latest = df.iloc[-1]
-        feats.append({
+    out = []
+    for team, g in long.groupby("team"):
+        gg = roll_feats(g)
+        # take the most recent row for each team as current form
+        r = gg.iloc[-1]
+        out.append({
             "team": team,
-            "last5_ppg": latest.get("last5_ppg"), "last5_gdpg": latest.get("last5_gdpg"),
-            "last5_xgpg": latest.get("last5_xgpg"), "last5_xgapg": latest.get("last5_xgapg"),
-            "last10_ppg": latest.get("last10_ppg"), "last10_gdpg": latest.get("last10_gdpg"),
-            "last10_xgpg": latest.get("last10_xgpg"), "last10_xgapg": latest.get("last10_xgapg"),
+            "last5_ppg":  r["last5_ppg"],  "last5_gdpg":  r["last5_gdpg"],
+            "last5_xgpg": r["last5_xgpg"], "last5_xgapg": r["last5_xgapg"],
+            "last10_ppg": r["last10_ppg"], "last10_gdpg": r["last10_gdpg"],
+            "last10_xgpg":r["last10_xgpg"],"last10_xgapg":r["last10_xgapg"],
         })
 
-    out = pd.DataFrame(feats)
-    out.to_csv(OUT, index=False)
-    print(f"[OK] wrote {OUT} rows={len(out)}")
+    out_df = pd.DataFrame(out)
+    out_df.to_csv(OUT, index=False)
+    print(f"[OK] build_rolling_features: wrote {OUT} rows={len(out_df)}")
 
 if __name__ == "__main__":
     main()
