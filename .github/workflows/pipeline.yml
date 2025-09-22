@@ -147,7 +147,7 @@ jobs:
         run: python scripts/02_blend_and_calibrate.py
 
       # ---------- Predictions (1X2 baseline) ----------
-      - name: Generate 7-day predictions (1X2)
+      - name: Generate 7-day predictions (1X2 with calibrated blend + odds)
         run: python scripts/model_predict.py
 
       # ---------- New: Goals μ and Totals 2.5 pricing ----------
@@ -178,8 +178,11 @@ jobs:
       - name: Backtest evaluate
         run: python scripts/backtest_evaluate.py
 
-      - name: Calibration report
+      - name: Calibration report (bins + summary)
         run: python scripts/calibration_report.py
+
+      - name: Calibration by league
+        run: python scripts/calibration_by_league.py
 
       - name: Feature importance (explainability)
         run: python scripts/feature_importance.py
@@ -202,10 +205,14 @@ jobs:
       - name: Council Briefing (expanded)
         run: python scripts/council_briefing.py
 
-      # ---------- Make sure ANTI_MODEL_VETOES exists ----------
+      # ---------- Ensure anti-model veto file exists ----------
       - name: Ensure anti-model veto file
         run: |
           test -f runs/${{ env.RUN_DATE }}/ANTI_MODEL_VETOES.csv || echo "slice,reason" > runs/${{ env.RUN_DATE }}/ANTI_MODEL_VETOES.csv
+
+      # ---------- Schema check BEFORE bundling ----------
+      - name: Schema check (headers & presence)
+        run: python scripts/schema_check.py
 
       # ---------- Sync legacy outputs into RUN dir for bundling ----------
       - name: Sync legacy outputs to RUN dir
