@@ -3,6 +3,7 @@ import os, zipfile
 from datetime import datetime
 
 RUN_DIR = os.path.join("runs", datetime.utcnow().strftime("%Y-%m-%d"))
+
 REQUIRED = [
     "PREDICTIONS_7D.csv",
     "PREDICTIONS_BTTS_7D.csv",
