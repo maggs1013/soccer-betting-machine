@@ -3,7 +3,7 @@ name: Soccer Betting Machine
 on:
   workflow_dispatch: {}
   schedule:
-    - cron: "0 9 * * *"   # run daily at 09:00 UTC (adjust as needed)
+    - cron: "0 9 * * *"   # daily at 09:00 UTC
 
 jobs:
   build:
@@ -39,7 +39,7 @@ jobs:
         run: python scripts/fetch_football_data.py
 
       # ---------- Odds (API only; no manual override) ----------
-      - name: Fetch Odds (Odds API only)
+      - name: Fetch Odds (Odds API only; multi-sport sweep)
         env:
           THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
         run: python scripts/fetch_the_odds_api.py
@@ -106,18 +106,30 @@ jobs:
       - name: Data quality diagnostics (compat)
         run: python scripts/data_quality_diagnostics.py
 
+      - name: Verify xG end-to-end
+        run: python scripts/verify_xg_end_to_end.py
+
+      - name: Odds coverage diagnostics
+        run: python scripts/odds_coverage_diagnostics.py
+
       - name: Build league xG table
         run: python scripts/derive_league_table_metrics.py
 
-      # ---------- ML: form, blend, calibration ----------
+      # ---------- ML: form, feature model, blend, calibration ----------
       - name: Build rolling form features
         run: python scripts/build_rolling_features.py
+
+      - name: Train feature model
+        run: python scripts/train_feature_model.py
+
+      - name: Predict feature-model probabilities (upcoming)
+        run: python scripts/predict_feature_model.py
 
       - name: Blend and calibrate (02 step)
         run: python scripts/02_blend_and_calibrate.py
 
       # ---------- Predictions (probabilities always; Kelly only if odds present) ----------
-      - name: Generate 7-day predictions (no-manual-odds mode)
+      - name: Generate 7-day predictions
         run: python scripts/model_predict.py
 
       # ---------- Evaluation & Council Briefing ----------
@@ -145,6 +157,8 @@ jobs:
             data/PREDICTIONS_7D.csv
             data/DATA_INVENTORY_REPORT.csv
             data/DATA_QUALITY_REPORT.csv
+            data/VERIFY_XG_REPORT.csv
+            data/ODDS_COVERAGE_REPORT.csv
             data/LEAGUE_XG_TABLE.csv
             data/team_form_features.csv
             data/model_blend.json
@@ -155,6 +169,9 @@ jobs:
             data/CALIBRATION_SUMMARY.csv
             data/ACTIONABILITY_REPORT.csv
             data/COUNCIL_BRIEFING.md
+            data/feature_model.pkl
+            data/feature_model_features.json
+            data/feature_proba_upcoming.csv
             data/xg_metrics_current.csv
             data/xg_metrics_last.csv
             data/xg_metrics_hybrid.csv
