@@ -202,6 +202,15 @@ jobs:
       - name: Council Briefing (expanded)
         run: python scripts/council_briefing.py
 
+      # ---------- Make sure ANTI_MODEL_VETOES exists ----------
+      - name: Ensure anti-model veto file
+        run: |
+          test -f runs/${{ env.RUN_DATE }}/ANTI_MODEL_VETOES.csv || echo "slice,reason" > runs/${{ env.RUN_DATE }}/ANTI_MODEL_VETOES.csv
+
+      # ---------- Sync legacy outputs into RUN dir for bundling ----------
+      - name: Sync legacy outputs to RUN dir
+        run: python scripts/sync_to_run_dir.py
+
       # ---------- Ship bundles (legacy + new) ----------
       - name: Export sbm-7d-bundle (new consolidated zip)
         run: python scripts/export_artifacts.py
