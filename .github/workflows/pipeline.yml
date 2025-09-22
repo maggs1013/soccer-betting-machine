@@ -1,167 +1,188 @@
-name: Soccer Betting Machine
+# scripts/00_build_teams_master.py
+# Build/seed data/teams_master.csv (GK, set-piece, crowd priors) from available sources.
+# - Reads team lists from hybrid xG, Understat, StatsBomb, FBref, HIST/UPCOMING
+# - Applies both team_name_map.csv and teams_alias_overrides.csv
+# - Derives priors:
+#     gk_rating          ~ 0.75 + 0.10 * (psxg_minus_goals_sb)   -> clamped [0.55, 0.92]
+#     setpiece_rating    ~ 0.55 + 0.25 * (setpiece_xg_share)     -> clamped [0.50, 0.90]
+#     crowd_index        ~ default 0.70 (hand-tune later)
+# - Deduplicates team names BEFORE any reindex/merge (prevents InvalidIndexError)
+# - Writes data/teams_master.csv (overwrites)
 
-on:
-  workflow_dispatch: {}
-  schedule:
-    - cron: "0 9 * * *"   # run daily at 09:00 UTC (adjust as needed)
+import os
+import pandas as pd
+import numpy as np
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
+DATA = "data"
+OUT  = os.path.join(DATA, "teams_master.csv")
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+# Optional sources (read safely)
+SRC = {
+    "hybrid":          os.path.join(DATA, "xg_metrics_hybrid.csv"),
+    "understat":       os.path.join(DATA, "xg_understat.csv"),
+    "sb_totals":       os.path.join(DATA, "xg_statsbomb.csv"),
+    "sb_features":     os.path.join(DATA, "team_statsbomb_features.csv"),
+    "fbref":           os.path.join(DATA, "sd_fbref_team_stats.csv"),
+    "hist":            os.path.join(DATA, "HIST_matches.csv"),
+    "upcoming":        os.path.join(DATA, "UPCOMING_fixtures.csv"),
+    "name_map":        os.path.join(DATA, "team_name_map.csv"),
+    "alias_overrides": os.path.join(DATA, "teams_alias_overrides.csv"),
+}
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+def safe_read_csv(path, cols=None):
+    if not os.path.exists(path):
+        return pd.DataFrame(columns=cols or [])
+    try:
+        df = pd.read_csv(path)
+        if cols:
+            for c in cols:
+                if c not in df.columns:
+                    df[c] = np.nan
+        return df
+    except Exception:
+        return pd.DataFrame(columns=cols or [])
 
-      - name: Upgrade pip
-        run: python -m pip install --upgrade pip
+def clamp(v, lo, hi):
+    try:
+        v = float(v)
+    except Exception:
+        return (lo + hi) / 2.0
+    return max(lo, min(hi, v))
 
-      - name: Install requirements
-        run: pip install -r requirements.txt
+def load_name_maps():
+    nm = {}
+    for p in [SRC["name_map"], SRC["alias_overrides"]]:
+        df = safe_read_csv(p, ["raw","canonical"])
+        if not df.empty and {"raw","canonical"}.issubset(df.columns):
+            for r in df.itertuples(index=False):
+                raw = str(getattr(r, "raw")).strip()
+                can = str(getattr(r, "canonical")).strip()
+                if raw and can:
+                    nm[raw] = can  # overrides win because alias_overrides loaded last
+    return nm
 
-      - name: Set PYTHONPATH (enable util_* imports)
-        run: echo "PYTHONPATH=$GITHUB_WORKSPACE:$GITHUB_WORKSPACE/scripts" >> $GITHUB_ENV
+def apply_map(series, nm):
+    if series is None: 
+        return series
+    s = series.astype(str).str.strip()
+    return s.map(lambda x: nm.get(x, x))
 
-      # ---------- Probes ----------
-      - name: Probe APIs (FBR / Odds API)
-        env:
-          FBR_API_KEY: ${{ secrets.FBR_API_KEY }}
-          THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
-        run: python scripts/test_endpoints.py
+def gather_team_universe(nm):
+    names = []
 
-      # ---------- Historical backbone ----------
-      - name: Fetch Football-Data (historical)
-        run: python scripts/fetch_football_data.py
+    # Hybrid xG
+    hyb = safe_read_csv(SRC["hybrid"], ["team"])
+    if not hyb.empty and "team" in hyb.columns:
+        names.append(apply_map(hyb["team"], nm))
 
-      # ---------- Odds (API only; no manual override) ----------
-      - name: Fetch Odds (Odds API only)
-        env:
-          THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
-        run: python scripts/fetch_the_odds_api.py
+    # Understat
+    ust = safe_read_csv(SRC["understat"], ["team"])
+    if not ust.empty and "team" in ust.columns:
+        names.append(apply_map(ust["team"], nm))
 
-      # ---------- xG / Strength sources ----------
-      - name: Fetch via soccerdata (FBref + 538)
-        run: python scripts/fetch_soccerdata.py
+    # StatsBomb totals
+    sbt = safe_read_csv(SRC["sb_totals"], ["team"])
+    if not sbt.empty and "team" in sbt.columns:
+        names.append(apply_map(sbt["team"], nm))
 
-      - name: Fetch Understat xG (Big-5)
-        run: python scripts/fetch_understat_xg.py
+    # StatsBomb features
+    sbf = safe_read_csv(SRC["sb_features"], ["team"])
+    if not sbf.empty and "team" in sbf.columns:
+        names.append(apply_map(sbf["team"], nm))
 
-      - name: Fetch StatsBomb xG (open data)
-        run: python scripts/fetch_statsbomb_xg.py
+    # FBref teams
+    fbr = safe_read_csv(SRC["fbref"], ["team"])
+    if not fbr.empty and "team" in fbr.columns:
+        names.append(apply_map(fbr["team"], nm))
 
-      # ---------- Normalize names across sources (main map + overrides) ----------
-      - name: Normalize team names across sources
-        run: python scripts/normalize_all_team_names.py
+    # HIST (home/away)
+    hist = safe_read_csv(SRC["hist"], ["home_team","away_team"])
+    if not hist.empty:
+        names.append(apply_map(hist["home_team"], nm))
+        names.append(apply_map(hist["away_team"], nm))
 
-      # ---------- Merge xG into hybrid (fill-only) ----------
-      - name: Merge FBref xG fallback into hybrid
-        run: python scripts/merge_sd_fbref_into_xg.py
+    # UPCOMING (home/away)
+    upc = safe_read_csv(SRC["upcoming"], ["date","home_team","away_team"])
+    if not upc.empty:
+        names.append(apply_map(upc["home_team"], nm))
+        names.append(apply_map(upc["away_team"], nm))
 
-      - name: Merge Understat xG into hybrid (fill missing only)
-        run: python scripts/merge_understat_into_xg.py
+    if not names:
+        return pd.DataFrame(columns=["team"])
 
-      - name: Merge StatsBomb xG into hybrid (fill missing only)
-        run: python scripts/merge_statsbomb_into_xg.py
+    # Concatenate, drop NA, strip, deduplicate
+    allnames = pd.concat(names, ignore_index=True).dropna()
+    allnames = allnames.astype(str).str.strip()
+    allnames = pd.Series(allnames.unique(), name="team").to_frame()
+    allnames = allnames[allnames["team"] != ""].reset_index(drop=True)
+    return allnames
 
-      # ---------- Priors & guarantees ----------
-      - name: Build teams master (seed priors)
-        run: python scripts/00_build_teams_master.py
+def derive_priors(allteams, nm):
+    # Defaults
+    pri = allteams.copy()
+    pri["gk_rating"] = 0.75
+    pri["setpiece_rating"] = 0.55
+    pri["crowd_index"] = 0.70
 
-      - name: Ensure minimal data files exist
-        run: python scripts/ensure_min_files.py
+    # StatsBomb features (xA, psxg_minus_goals, setpiece vs openplay) → derive GK & set-piece priors
+    sbf = safe_read_csv(SRC["sb_features"], ["team","psxg_minus_goals_sb","setpiece_xg_sb","openplay_xg_sb"])
+    if not sbf.empty:
+        sbf["team"] = apply_map(sbf["team"], nm)
+        sbf = (sbf.groupby("team", as_index=False)
+                    .agg(psxg=("psxg_minus_goals_sb","mean"),
+                         sp=("setpiece_xg_sb","mean"),
+                         op=("openplay_xg_sb","mean")))
 
-      - name: Generate matchday injuries/lineups templates (next 7 days)
-        run: python scripts/generate_matchday_templates.py
+        # GK rating from shot-stopping
+        sbf["gk_rating"] = sbf["psxg"].map(lambda v: clamp(0.75 + 0.10*float(v if pd.notna(v) else 0.0), 0.55, 0.92))
+        # Set-piece rating from share of xG from set pieces
+        share = np.where((sbf["sp"]+sbf["op"])>0, sbf["sp"]/(sbf["sp"]+sbf["op"]), 0.0)
+        sbf["setpiece_rating"] = [clamp(0.55 + 0.25*float(x), 0.50, 0.90) for x in share]
+        sbf = sbf[["team","gk_rating","setpiece_rating"]]
 
-      # ---------- Upcoming window (with fixtures fallback) ----------
-      - name: Build Upcoming 7-day window (enriched)
-        run: python scripts/build_upcoming_window.py
+        pri = pri.merge(sbf, on="team", how="left", suffixes=("","_sb"))
+        # prefer SB-derived columns where present
+        for c in ["gk_rating","setpiece_rating"]:
+            pri[c] = np.where(pri[f"{c}_sb"].notna(), pri[f"{c}_sb"], pri[c])
+            pri.drop(columns=[f"{c}_sb"], inplace=True)
 
-      # ---------- Enrichment (custom + legacy safe pass) ----------
-      - name: Enrich fixtures (01 step)
-        run: python scripts/01_enrich_fixtures.py
+    # If you want, fold hybrid strength for minor nudges (optional, gentle)
+    hyb = safe_read_csv(SRC["hybrid"], ["team","xgd90_hybrid"])
+    if not hyb.empty:
+        hyb["team"] = apply_map(hyb["team"], nm)
+        # small bonus for very strong teams to set-piece rating (they likely draw more set-piece xG)
+        hyb["sp_bonus"] = hyb["xgd90_hybrid"].map(lambda v: 0.02*float(v) if pd.notna(v) else 0.0)
+        hyb["sp_bonus"] = hyb["sp_bonus"].clip(-0.03, 0.03)
+        pri = pri.merge(hyb[["team","sp_bonus"]], on="team", how="left")
+        pri["setpiece_rating"] = pri["setpiece_rating"] + pri["sp_bonus"].fillna(0.0)
+        pri["setpiece_rating"] = pri["setpiece_rating"].map(lambda v: clamp(v, 0.50, 0.90))
+        pri.drop(columns=["sp_bonus"], inplace=True, errors="ignore")
 
-      - name: Enrich features (normalize + merge injuries/refs/stadium + SB team features)
-        run: python scripts/enrich_features.py
+    # Final clamps
+    pri["gk_rating"] = pri["gk_rating"].map(lambda v: clamp(v, 0.55, 0.92))
+    pri["setpiece_rating"] = pri["setpiece_rating"].map(lambda v: clamp(v, 0.50, 0.90))
+    pri["crowd_index"] = pri["crowd_index"].map(lambda v: clamp(v, 0.50, 0.98))
 
-      # ---------- Final modeling schema ----------
-      - name: Build HIST & UPCOMING
-        run: python scripts/build_hist_and_upcoming.py
+    return pri[["team","gk_rating","setpiece_rating","crowd_index"]].drop_duplicates("team").reset_index(drop=True)
 
-      # ---------- Operational reports ----------
-      - name: Emit quality report (03 step)
-        run: python scripts/03_emit_quality_report.py
+def main():
+    os.makedirs(DATA, exist_ok=True)
 
-      - name: Check inventory (04 step)
-        run: python scripts/04_check_inventory.py
+    # 1) Load name maps (main + overrides) and build canonical team list
+    name_map = load_name_maps()
+    allteams = gather_team_universe(name_map)
+    if allteams.empty:
+        # still write a valid file (headers only)
+        pd.DataFrame(columns=["team","gk_rating","setpiece_rating","crowd_index"]).to_csv(OUT, index=False)
+        print("[WARN] No teams found across sources; wrote header-only teams_master.csv")
+        return
 
-      - name: Data inventory report (compat)
-        run: python scripts/data_inventory_report.py
+    # 2) Derive priors safely (no duplicate index ops)
+    pri = derive_priors(allteams, name_map)
 
-      - name: Data quality diagnostics (compat)
-        run: python scripts/data_quality_diagnostics.py
+    # 3) Save
+    pri.to_csv(OUT, index=False)
+    print(f"[OK] wrote {OUT} rows={len(pri)}")
 
-      - name: Build league xG table
-        run: python scripts/derive_league_table_metrics.py
-
-      # ---------- ML: form, blend, calibration ----------
-      - name: Build rolling form features
-        run: python scripts/build_rolling_features.py
-
-      - name: Blend and calibrate (02 step)
-        run: python scripts/02_blend_and_calibrate.py
-
-      # ---------- Predictions (probabilities always; Kelly only if odds present) ----------
-      - name: Generate 7-day predictions (no-manual-odds mode)
-        run: python scripts/model_predict.py
-
-      # ---------- Evaluation & Council Briefing ----------
-      - name: Backtest evaluate
-        run: python scripts/backtest_evaluate.py
-
-      - name: Calibration report
-        run: python scripts/calibration_report.py
-
-      - name: Actionability report
-        run: python scripts/actionability_report.py
-
-      - name: Council Briefing
-        run: python scripts/council_briefing.py
-
-      # ---------- Ship bundle ----------
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: sbm-7d-bundle
-          path: |
-            data/HIST_matches.csv
-            data/UPCOMING_fixtures.csv
-            data/UPCOMING_7D_enriched.csv
-            data/PREDICTIONS_7D.csv
-            data/DATA_INVENTORY_REPORT.csv
-            data/DATA_QUALITY_REPORT.csv
-            data/LEAGUE_XG_TABLE.csv
-            data/team_form_features.csv
-            data/model_blend.json
-            data/calibrator.pkl
-            data/BACKTEST_SUMMARY.csv
-            data/BACKTEST_BY_WEEK.csv
-            data/CALIBRATION_TABLE.csv
-            data/CALIBRATION_SUMMARY.csv
-            data/ACTIONABILITY_REPORT.csv
-            data/COUNCIL_BRIEFING.md
-            data/xg_metrics_current.csv
-            data/xg_metrics_last.csv
-            data/xg_metrics_hybrid.csv
-            data/xg_understat.csv
-            data/xg_statsbomb.csv
-            data/team_statsbomb_features.csv
-            data/sd_fbref_team_stats.csv
-            data/sd_538_spi.csv
-            data/teams_master.csv
-            data/api_probe_report.json
+if __name__ == "__main__":
+    main()
