@@ -1,18 +1,28 @@
-# scripts/anti_model_vetoes.py
+#!/usr/bin/env python3
 # Identify systematic losing slices and mark vetoes (league × odds bucket).
 # Reads: data/HIST_matches.csv, data/model_blend.json
-# Writes: data/ANTI_MODEL_VETOES.csv
+# Writes:
+#   data/ANTI_MODEL_VETOES.csv        (slice, reason)           ← minimal for gates
+#   data/VETO_HISTORY.csv             (league, bucket, n, roi…) ← detailed
+#   runs/YYYY-MM-DD copies of both
 
 import os, json, numpy as np, pandas as pd
+from datetime import datetime
 
 DATA="data"
+RUN_DIR = os.path.join("runs", datetime.utcnow().strftime("%Y-%m-%d"))
+os.makedirs(RUN_DIR, exist_ok=True)
+
 HIST=os.path.join(DATA,"HIST_matches.csv")
 BLND=os.path.join(DATA,"model_blend.json")
-OUT =os.path.join(DATA,"ANTI_MODEL_VETOES.csv")
+
+VETO_MIN_DATA = os.path.join(DATA,"ANTI_MODEL_VETOES.csv")
+VETO_MIN_RUN  = os.path.join(RUN_DIR,"ANTI_MODEL_VETOES.csv")
+VETO_FULL_DATA= os.path.join(DATA,"VETO_HISTORY.csv")
+VETO_FULL_RUN = os.path.join(RUN_DIR,"VETO_HISTORY.csv")
 
 def implied(x):
-    try:
-        x=float(x); return 1.0/x if x>0 else np.nan
+    try: x=float(x); return 1.0/x if x>0 else np.nan
     except: return np.nan
 
 def strip_vig(h,d,a):
@@ -49,27 +59,42 @@ def kelly(p, odds, cap=0.05):
     except: return 0.0
 
 def main():
-    if not (os.path.exists(HIST) and os.path.exists(BLND)):
-        pd.DataFrame(columns=["league","odds_bucket","n_bets","roi","veto"]).to_csv(OUT,index=False)
-        print(f"[WARN] Missing inputs; wrote empty {OUT}"); return
+    # Guard inputs
+    if not os.path.exists(HIST):
+        pd.DataFrame(columns=["slice","reason"]).to_csv(VETO_MIN_DATA,index=False)
+        pd.DataFrame(columns=["league","odds_bucket","n_bets","roi","veto"]).to_csv(VETO_FULL_DATA,index=False)
+        for p in (VETO_MIN_DATA,VETO_FULL_DATA):  # mirror to runs
+            fn = os.path.join(RUN_DIR, os.path.basename(p))
+            pd.read_csv(p).to_csv(fn, index=False)
+        print("[WARN] HIST missing; wrote empty veto files.")
+        return
+
     df=pd.read_csv(HIST)
     if df.empty or not {"home_odds_dec","draw_odds_dec","away_odds_dec","home_goals","away_goals"}.issubset(df.columns):
-        pd.DataFrame(columns=["league","odds_bucket","n_bets","roi","veto"]).to_csv(OUT,index=False)
-        print(f"[WARN] HIST lacks fields; wrote empty {OUT}"); return
+        pd.DataFrame(columns=["slice","reason"]).to_csv(VETO_MIN_DATA,index=False)
+        pd.DataFrame(columns=["league","odds_bucket","n_bets","roi","veto"]).to_csv(VETO_FULL_DATA,index=False)
+        for p in (VETO_MIN_DATA,VETO_FULL_DATA):
+            fn = os.path.join(RUN_DIR, os.path.basename(p))
+            pd.read_csv(p).to_csv(fn, index=False)
+        print("[WARN] HIST lacks fields; wrote empty veto files.")
+        return
 
     if "league" not in df.columns: df["league"]="GLOBAL"
     df["date"]=pd.to_datetime(df["date"], errors="coerce")
     df=df.dropna(subset=["date"]).sort_values("date")
 
-    mb=json.load(open(BLND,"r"))
-    w_global=float(mb.get("w_market_global",0.85))
-    w_leagues=mb.get("w_market_leagues",{}) or {}
+    w_global=0.85; w_leagues={}
+    if os.path.exists(BLND):
+        try:
+            mb=json.load(open(BLND,"r"))
+            w_global=float(mb.get("w_market_global",0.85))
+            w_leagues=mb.get("w_market_leagues",{}) or {}
+        except Exception:
+            pass
 
-    # market probs
     mH=df["home_odds_dec"].map(implied); mD=df["draw_odds_dec"].map(implied); mA=df["away_odds_dec"].map(implied)
     m=np.array([strip_vig(h,d,a) for h,d,a in zip(mH,mD,mA)],dtype=float)
 
-    # elo probs
     R={}; e=[]
     for r in df.itertuples(index=False):
         h,a=r.home_team,r.away_team
@@ -82,11 +107,11 @@ def main():
         R[h]=R[h]+K*(score-Eh); R[a]=R[a]+K*((1.0-score)-(1.0-Eh))
     e=np.array(e,dtype=float)
 
-    # strategy: bet side with positive edge, kelly capped 5%
     bins=[0,1.8,2.2,3.0,5.0,10.0,999]
     labels=["<=1.8","(1.8,2.2]","(2.2,3.0]","(3.0,5.0]","(5.0,10.0]","10+"]
 
     rows=[]
+    simple_rows=[]
     for lg, dL in df.groupby("league"):
         w=w_leagues.get(lg,w_global)
         idx=dL.index.values
@@ -104,27 +129,37 @@ def main():
                 p=blend[i,1]; odds=row.draw_odds_dec; res = 1 if row.home_goals==row.away_goals else 0
             else:
                 p=blend[i,2]; odds=row.away_odds_dec; res = 1 if row.home_goals<row.away_goals else 0
-            if not np.isfinite(odds) or p<=0: stakes.append(0.0); pnls.append(0.0); chosen_odds.append(np.nan); continue
+            if not np.isfinite(odds) or p<=0:
+                stakes.append(0.0); pnls.append(0.0); chosen_odds.append(np.nan); continue
             k=kelly(p,odds,cap=0.05)
-            stakes.append(k)
-            chosen_odds.append(odds)
+            stakes.append(k); chosen_odds.append(odds)
             pnls.append((odds-1.0)*k if res==1 else -k)
 
         d2=dL.copy()
         d2["stake"]=stakes; d2["pnl"]=pnls; d2["chosen_odds"]=chosen_odds
         d2["odds_bucket"]=pd.cut(d2["chosen_odds"], bins=bins, labels=labels, include_lowest=True)
+
         for bk, g in d2.groupby("odds_bucket"):
             n=int((g["stake"]>0).sum())
-            if n<30:  # min sample
+            if n<30:
                 rows.append({"league":lg,"odds_bucket":str(bk),"n_bets":n,"roi":0.0,"veto":"N/A"})
                 continue
             turnover=float(g["stake"].sum())
             roi=float(g["pnl"].sum())/turnover if turnover>0 else 0.0
             veto = "Y" if roi < -0.02 else "N"
             rows.append({"league":lg,"odds_bucket":str(bk),"n_bets":n,"roi":roi,"veto":veto})
+            if veto=="Y":
+                simple_rows.append({
+                    "slice": f"{lg} :: odds_bucket={bk}",
+                    "reason": f"ROI {roi:.3f} < -0.02 on {n} bets"
+                })
 
-    pd.DataFrame(rows).to_csv(OUT,index=False)
-    print(f"[OK] wrote {OUT}")
+    # Write detailed + minimal, to data/ and runs/
+    pd.DataFrame(rows).to_csv(VETO_FULL_DATA, index=False)
+    pd.DataFrame(simple_rows if simple_rows else [], columns=["slice","reason"]).to_csv(VETO_MIN_DATA, index=False)
+    pd.read_csv(VETO_FULL_DATA).to_csv(VETO_FULL_RUN, index=False)
+    pd.read_csv(VETO_MIN_DATA).to_csv(VETO_MIN_RUN, index=False)
+    print(f"[OK] wrote {VETO_FULL_DATA} and {VETO_MIN_DATA}")
 
 if __name__ == "__main__":
     main()
