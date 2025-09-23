@@ -34,24 +34,18 @@ def main():
     up = safe_read(UP)
     if up.empty:
         print(f"[WARN] {UP} missing/empty; wrote no seasonality.")
-        # still emit an empty seasonality file
         pd.DataFrame(columns=["league","month","engine_league_gpg_month"]).to_csv(OUTS, index=False)
         return
 
     hist = safe_read(HIST, ["date","home_team","away_team","home_goals","away_goals","league"])
     if hist.empty:
-        # fallback: global neutral 2.60
         if "league" not in up.columns: up["league"] = "GLOBAL"
-        if "date" not in up.columns:
-            up["engine_league_gpg_month"] = 2.60
-        else:
-            up["engine_league_gpg_month"] = 2.60
+        up["engine_league_gpg_month"] = 2.60
         up.to_csv(UP, index=False)
         pd.DataFrame(columns=["league","month","engine_league_gpg_month"]).to_csv(OUTS, index=False)
         print(f"[OK] seasonality fallback merged → {UP}")
         return
 
-    # compute month-level league gpg
     hist["date"] = pd.to_datetime(hist["date"], errors="coerce")
     hist = hist.dropna(subset=["date"]).sort_values("date")
     if "league" not in hist.columns: hist["league"] = "GLOBAL"
@@ -59,17 +53,13 @@ def main():
     hist["gpg"] = (hist["home_goals"] + hist["away_goals"]).astype(float)
     seasonality = hist.groupby(["league","month"], as_index=False)["gpg"].mean().rename(
         columns={"gpg":"engine_league_gpg_month"})
-
-    # save table
     seasonality.to_csv(OUTS, index=False)
 
-    # merge into upcoming by league + month of fixture date
     up["date"] = pd.to_datetime(up.get("date", pd.NaT), errors="coerce")
     up["month"] = up["date"].dt.month
     if "league" not in up.columns: up["league"] = "GLOBAL"
     up = up.merge(seasonality, on=["league","month"], how="left")
     up.drop(columns=["month"], inplace=True)
-    # fill with league median or global default
     if "engine_league_gpg_month" in up.columns:
         med = up["engine_league_gpg_month"].median()
         up["engine_league_gpg_month"] = up["engine_league_gpg_month"].fillna(med if np.isfinite(med) else 2.60)
