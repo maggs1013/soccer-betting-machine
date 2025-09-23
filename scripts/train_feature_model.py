@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # Train a multinomial logistic feature model using multiple windows & contrasts,
 # with time-decay weighting so recent matches matter more.
+#
+# Robust: if HIST has no 'league' column, we create league='GLOBAL' and proceed.
 
 import os, json, pickle
 import numpy as np
@@ -17,7 +19,7 @@ FORM = os.path.join(DATA, "team_form_features.csv")
 OUTM = os.path.join(DATA, "feature_model.pkl")
 OUTF = os.path.join(DATA, "feature_model_features.json")
 
-HALF_LIFE_DAYS = 180.0  # adjust to tune recency
+HALF_LIFE_DAYS = 180.0  # adjust to tune recency weighting
 
 def safe_read(p, cols=None):
     if not os.path.exists(p):
@@ -45,6 +47,11 @@ def build_team_windows_from_hist(H):
     H = H.copy()
     H["date"] = pd.to_datetime(H["date"], errors="coerce")
     H = H.dropna(subset=["date"]).sort_values("date")
+
+    # Ensure 'league' is present so downstream merges/selects are safe
+    if "league" not in H.columns:
+        H["league"] = "GLOBAL"
+
     # long format
     h = H[["date","home_team","home_goals","away_goals","league"]].rename(
         columns={"home_team":"team","home_goals":"gf"})
@@ -54,9 +61,10 @@ def build_team_windows_from_hist(H):
     a["ga"] = H["home_goals"]
     long = pd.concat([h,a], ignore_index=True).sort_values("date")
     long["season"] = to_season(long["date"])
+
     long["pts"] = 0
-    long.loc[long["gf"]>long["ga"], "pts"] = 3
-    long.loc[long["gf"]==long["ga"], "pts"] = 1
+    long.loc[long["gf"] > long["ga"], "pts"] = 3
+    long.loc[long["gf"] == long["ga"], "pts"] = 1
 
     rows = []
     for team, g in long.groupby("team"):
@@ -67,7 +75,7 @@ def build_team_windows_from_hist(H):
             row[f"last{n}_ppg"] = g["pts"].rolling(n, min_periods=1).mean().iloc[-1]
         # season ppg
         season = g["season"].iloc[-1]
-        g_season = g[g["season"]==season]
+        g_season = g[g["season"] == season]
         row["season_ppg"] = g_season["pts"].mean() if not g_season.empty else np.nan
         # goal volatility
         row["goal_volatility_5"]  = g["gf"].rolling(5,  min_periods=2).var().iloc[-1]
@@ -99,7 +107,7 @@ def main():
         spi_small = spi.groupby("team", as_index=False)[[off_col,def_col]].mean()
         spi_small = spi_small.rename(columns={off_col:"spi_off", def_col:"spi_def"})
 
-    form = safe_read(FORM, ["team","last5_xgpg"])  # optional for finishing eff alignment later
+    form = safe_read(FORM, ["team","last5_xgpg"])  # optional xG context
 
     # merge to build teamvec
     teamvec = pd.DataFrame({"team": pd.unique(pd.concat([hyb["team"], sbf["team"], spi_small["team"]], ignore_index=True).dropna())})
@@ -119,21 +127,20 @@ def main():
     tv_win = build_team_windows_from_hist(hist)
     teamvec = teamvec.merge(tv_win, on="team", how="left")
 
-    # xG momentum proxies (we only have last5_xgpg in FORM)
+    # xG proxy (we only have last5_xgpg in FORM)
     if not form.empty:
-        teamvec = teamvec.merge(form.rename(columns={"team":"team"}), on="team", how="left")
+        teamvec = teamvec.merge(form, on="team", how="left")
         teamvec["last5_xgpg"] = teamvec["last5_xgpg"].where(np.isfinite(teamvec["last5_xgpg"]), np.nan)
-        # for lack of historical xG timeline, keep last5_xgpg; others remain NaN
     else:
         teamvec["last5_xgpg"] = np.nan
 
     # Add contrasts
     teamvec["ppg_momentum_3_10"]     = teamvec["last3_ppg"]  - teamvec["last10_ppg"]
     teamvec["ppg_momentum_5_season"] = teamvec["last5_ppg"]  - teamvec["season_ppg"]
-    teamvec["xg_momentum_3_10"]      = teamvec["last3_xgpg"] - teamvec["last10_xgpg"]
+    teamvec["xg_momentum_3_10"]      = teamvec.get("last3_xgpg", np.nan) - teamvec.get("last10_xgpg", np.nan)
     teamvec["xg_momentum_5_season"]  = teamvec["last5_xgpg"] - teamvec.get("season_xgpg", np.nan)
 
-    # Assemble feature list (keep compact, high signal)
+    # Assemble compact, high-signal feature list
     numeric_cols = [
         # core quality
         "xg_hybrid","xga_hybrid","xgd90_hybrid",
@@ -161,7 +168,8 @@ def main():
     for r, lab in zip(hist.itertuples(index=False), y):
         hv = teamvec[teamvec["team"]==r.home_team].head(1)
         av = teamvec[teamvec["team"]==r.away_team].head(1)
-        if hv.empty or av.empty: continue
+        if hv.empty or av.empty: 
+            continue
         diffs = (hv[numeric_cols].values - av[numeric_cols].values)[0]
         samples.append(diffs); labels.append(lab); dates.append(r.date)
 
