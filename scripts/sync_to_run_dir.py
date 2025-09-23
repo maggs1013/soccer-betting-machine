@@ -1,11 +1,4 @@
-#!/usr/bin/env python3
-import os, shutil
-from datetime import datetime
-
-RUN_DIR = os.path.join("runs", datetime.utcnow().strftime("%Y-%m-%d"))
-os.makedirs(RUN_DIR, exist_ok=True)
-
-# map: legacy -> run
+# … top unchanged …
 COPY = [
   ("data/PREDICTIONS_7D.csv", "PREDICTIONS_7D.csv"),
   ("data/ACTIONABILITY_REPORT.csv", "ACTIONABILITY_REPORT.csv"),
@@ -23,15 +16,9 @@ COPY = [
   ("data/ROI_BY_SLICE.csv", "ROI_BY_SLICE.csv"),
   ("data/COVERAGE_TRENDS.csv", "COVERAGE_TRENDS.csv"),
   ("data/ANTI_MODEL_VETOES.csv", "ANTI_MODEL_VETOES.csv"),
+  ("data/VETO_HISTORY.csv", "VETO_HISTORY.csv"),            # ← add
   ("data/PREDICTIONS_BTTS_7D.csv", "PREDICTIONS_BTTS_7D.csv"),
   ("data/PREDICTIONS_TOTALS_7D.csv", "PREDICTIONS_TOTALS_7D.csv"),
   ("data/PER_LEAGUE_BLEND_WEIGHTS.csv", "PER_LEAGUE_BLEND_WEIGHTS.csv")
 ]
-
-def cp(src, dst):
-    if os.path.exists(src):
-        shutil.copy(src, os.path.join(RUN_DIR, dst))
-
-for s, d in COPY:
-    cp(s, d)
-print("Synced legacy artifacts to", RUN_DIR)
+# … rest unchanged …
