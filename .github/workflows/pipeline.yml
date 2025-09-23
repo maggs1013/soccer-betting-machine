@@ -7,7 +7,6 @@ on:
   pull_request:
     branches: [ main ]
 
-# Cancel in-progress runs on the same ref (saves minutes, avoids pileups)
 concurrency:
   group: pipeline-${{ github.ref }}
   cancel-in-progress: true
@@ -19,11 +18,9 @@ jobs:
       TZ: UTC
 
     steps:
-      # ---------- Checkout & Python ----------
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Cache pip to speed up installs
       - name: Cache pip
         uses: actions/cache@v4
         with:
@@ -47,7 +44,6 @@ jobs:
       - name: Set PYTHONPATH (enable util_* imports)
         run: echo "PYTHONPATH=$GITHUB_WORKSPACE:$GITHUB_WORKSPACE/scripts" >> $GITHUB_ENV
 
-      # ---------- Date scaffold (daily run dir under runs/YYYY-MM-DD) ----------
       - name: Prepare run directory
         id: datestamp
         run: |
@@ -56,24 +52,20 @@ jobs:
           mkdir -p runs/$RUN_DATE
           mkdir -p data
 
-      # ---------- Probes ----------
       - name: Probe APIs (FBR / Odds API)
         env:
           FBR_API_KEY: ${{ secrets.FBR_API_KEY }}
           THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
         run: python scripts/test_endpoints.py
 
-      # ---------- Historical backbone ----------
       - name: Fetch Football-Data (historical)
         run: python scripts/fetch_football_data.py
 
-      # ---------- Odds (API only; no manual override) ----------
       - name: Fetch Odds (Odds API only; multi-sport sweep)
         env:
           THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
         run: python scripts/fetch_the_odds_api.py
 
-      # ---------- xG / Strength sources ----------
       - name: Fetch via soccerdata (FBref + 538)
         run: python scripts/fetch_soccerdata.py
 
@@ -83,15 +75,12 @@ jobs:
       - name: Fetch StatsBomb xG (open data)
         run: python scripts/fetch_statsbomb_xg.py
 
-      # ---------- Optional: multi-book scrape for dispersion ----------
       - name: Scrape OddsPortal (optional secondary odds)
         run: python scripts/scrape_oddsportal.py || true
 
-      # ---------- Normalize names across sources ----------
       - name: Normalize team names across sources
         run: python scripts/normalize_all_team_names.py
 
-      # ---------- Merge xG into hybrid (fill-only) ----------
       - name: Merge FBref xG fallback into hybrid
         run: python scripts/merge_sd_fbref_into_xg.py
 
@@ -101,7 +90,6 @@ jobs:
       - name: Merge StatsBomb xG into hybrid (fill missing only)
         run: python scripts/merge_statsbomb_into_xg.py
 
-      # ---------- Priors & guarantees ----------
       - name: Build teams master (seed priors)
         run: python scripts/00_build_teams_master.py
 
@@ -111,28 +99,27 @@ jobs:
       - name: Generate matchday injuries/lineups templates (next 7 days)
         run: python scripts/generate_matchday_templates.py
 
-      # ---------- Upcoming window (with fixtures fallback) ----------
       - name: Build Upcoming 7-day window (enriched)
         run: python scripts/build_upcoming_window.py
 
-      # ---------- Enrichment ----------
       - name: Enrich fixtures (01 step)
         run: python scripts/01_enrich_fixtures.py
 
       - name: Enrich features (merge injuries/refs/stadium + SB team features)
         run: python scripts/enrich_features.py
 
-      # ---------- Final modeling schema ----------
+      # NEW: engineer extra variables into UPCOMING_7D_enriched.csv
+      - name: Engineer extra variables
+        run: python scripts/engineer_extra_variables.py
+
       - name: Build HIST & UPCOMING
         run: python scripts/build_hist_and_upcoming.py
 
-      # ---------- Sanity: key inputs exist (fail fast) ----------
       - name: Sanity check inputs
         run: |
           test -f data/HIST_matches.csv || (echo "ERROR: data/HIST_matches.csv missing" && exit 1)
           test -f data/UPCOMING_7D_enriched.csv || (echo "ERROR: data/UPCOMING_7D_enriched.csv missing" && exit 1)
 
-      # ---------- Operational reports (legacy) ----------
       - name: Emit quality report (03 step)
         run: python scripts/03_emit_quality_report.py
 
@@ -154,7 +141,6 @@ jobs:
       - name: Build league xG table
         run: python scripts/derive_league_table_metrics.py
 
-      # ---------- ML: form, feature model, blend, calibration ----------
       - name: Build rolling form features
         run: python scripts/build_rolling_features.py
 
@@ -167,29 +153,24 @@ jobs:
       - name: Blend and calibrate (02 step)
         run: python scripts/02_blend_and_calibrate.py
 
-      # ---------- Write blend weights (first time) ----------
       - name: Per-league blend weights table
         run: python scripts/per_league_blend_weights.py
 
-      # ---------- Predictions (1X2 baseline) ----------
       - name: Generate 7-day predictions (1X2 with calibrated blend + odds)
         run: python scripts/model_predict.py
 
-      # ---------- New: Goals μ and Totals 2.5 pricing ----------
       - name: Goals model (μ_home, μ_away)
         run: python scripts/goals_model.py
 
       - name: Totals pricing (main line 2.5)
         run: python scripts/totals_pricing.py
 
-      # ---------- New: BTTS v1 ----------
       - name: Train BTTS model (per-league)
         run: python scripts/train_btts_model.py
 
       - name: Predict BTTS (blend + isotonic per-league)
         run: python scripts/predict_btts_model.py
 
-      # ---------- New: Consistency checks & risk ----------
       - name: Consistency checks (1X2 ↔ Totals ↔ BTTS ↔ Spread)
         run: python scripts/consistency_checks.py
 
@@ -199,7 +180,6 @@ jobs:
       - name: Execution feasibility (liquidity/coverage)
         run: python scripts/execution_feasibility.py
 
-      # ---------- Evaluation & Council Briefing ----------
       - name: Backtest evaluate
         run: python scripts/backtest_evaluate.py
 
@@ -230,27 +210,26 @@ jobs:
       - name: Council Briefing (expanded)
         run: python scripts/council_briefing.py
 
-      # ---------- Ensure anti-model veto file exists ----------
       - name: Ensure anti-model veto file
         run: |
           test -f runs/${{ env.RUN_DATE }}/ANTI_MODEL_VETOES.csv || echo "slice,reason" > runs/${{ env.RUN_DATE }}/ANTI_MODEL_VETOES.csv
 
-      # ---------- Always (re)write blend weights immediately before schema gate ----------
       - name: Sanity (re)write blend weights + show paths
         run: |
           python scripts/per_league_blend_weights.py
           ls -l data/PER_LEAGUE_BLEND_WEIGHTS.csv || true
           ls -l runs/${{ env.RUN_DATE }}/PER_LEAGUE_BLEND_WEIGHTS.csv || true
 
-      # ---------- Schema check BEFORE bundling ----------
+      # NEW: model accuracy reports (after predictions/backtests)
+      - name: Model accuracy report
+        run: python scripts/model_accuracy_report.py
+
       - name: Schema check (headers & presence)
         run: python scripts/schema_check.py
 
-      # ---------- Sync legacy outputs into RUN dir for bundling ----------
       - name: Sync legacy outputs to RUN dir
         run: python scripts/sync_to_run_dir.py
 
-      # ---------- Ship bundles (legacy + new) ----------
       - name: Export sbm-7d-bundle (new consolidated zip)
         run: python scripts/export_artifacts.py
 
