@@ -146,6 +146,10 @@ jobs:
       - name: Blend and calibrate (02 step)
         run: python scripts/02_blend_and_calibrate.py
 
+      # ---------- NEW: Per-league blend weights table (REQUIRED by schema/bundle) ----------
+      - name: Per-league blend weights table
+        run: python scripts/per_league_blend_weights.py
+
       # ---------- Predictions (1X2 baseline) ----------
       - name: Generate 7-day predictions (1X2 with calibrated blend + odds)
         run: python scripts/model_predict.py
