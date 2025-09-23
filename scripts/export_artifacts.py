@@ -5,22 +5,32 @@ from datetime import datetime
 RUN_DIR = os.path.join("runs", datetime.utcnow().strftime("%Y-%m-%d"))
 
 REQUIRED = [
+    # Core predictions
     "PREDICTIONS_7D.csv",
     "PREDICTIONS_BTTS_7D.csv",
     "PREDICTIONS_TOTALS_7D.csv",
+    # Consistency / actionability / feasibility
     "CONSISTENCY_CHECKS.csv",
     "ACTIONABILITY_REPORT.csv",
-    "COUNCIL_BRIEFING.md",
+    "EXECUTION_FEASIBILITY.csv",
+    # Calibration & backtests
     "CALIBRATION_SUMMARY.csv",
     "ROI_BY_SLICE.csv",
-    "ODDS_COVERAGE_REPORT.csv",
-    "DATA_QUALITY_REPORT.csv",
-    "ANTI_MODEL_VETOES.csv",
     "FEATURE_IMPORTANCE.csv",
     "FEATURE_DRIFT.csv",
+    "BACKTEST_SUMMARY.csv",          # optional to keep; present in many runs
+    # Diagnostics
+    "ODDS_COVERAGE_REPORT.csv",
+    "DATA_QUALITY_REPORT.csv",
     "LINE_MOVE_LOG.csv",
-    "EXECUTION_FEASIBILITY.csv",
-    "PER_LEAGUE_BLEND_WEIGHTS.csv"
+    # Vetoes & weights
+    "ANTI_MODEL_VETOES.csv",
+    "PER_LEAGUE_BLEND_WEIGHTS.csv",
+    # New helper / dashboard artifacts
+    "AUTO_BRIEFING.md",              # renamed from COUNCIL_BRIEFING.md
+    "_INDEX.json",
+    "FLAGS.csv",
+    "ODDS_MOVE_FEATURES.csv"         # odds move deltas (AM vs T-60)
 ]
 
 def main():
