@@ -146,7 +146,7 @@ jobs:
       - name: Blend and calibrate (02 step)
         run: python scripts/02_blend_and_calibrate.py
 
-      # ---------- NEW: Per-league blend weights table (REQUIRED by schema/bundle) ----------
+      # ---------- Write blend weights (first time) ----------
       - name: Per-league blend weights table
         run: python scripts/per_league_blend_weights.py
 
@@ -213,6 +213,13 @@ jobs:
       - name: Ensure anti-model veto file
         run: |
           test -f runs/${{ env.RUN_DATE }}/ANTI_MODEL_VETOES.csv || echo "slice,reason" > runs/${{ env.RUN_DATE }}/ANTI_MODEL_VETOES.csv
+
+      # ---------- Always (re)write blend weights immediately before schema gate ----------
+      - name: Sanity: (re)write blend weights + show paths
+        run: |
+          python scripts/per_league_blend_weights.py
+          ls -l data/PER_LEAGUE_BLEND_WEIGHTS.csv || true
+          ls -l runs/${{ env.RUN_DATE }}/PER_LEAGUE_BLEND_WEIGHTS.csv || true
 
       # ---------- Schema check BEFORE bundling ----------
       - name: Schema check (headers & presence)
