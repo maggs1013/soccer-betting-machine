@@ -19,6 +19,8 @@ CAL_OK_SETS = [
     {"ece_weighted"}
 ]
 
+# What to check: {filename: required_columns}
+# Only require the *critical* subset; extras are OK
 CHECKS = {
     "PREDICTIONS_7D.csv": ["fixture_id","pH","pD","pA","oddsH","oddsD","oddsA"],
     "PREDICTIONS_BTTS_7D.csv": ["fixture_id","p_btts_yes"],
@@ -34,8 +36,7 @@ CHECKS = {
     "FEATURE_DRIFT.csv": None,
     "LINE_MOVE_LOG.csv": None,
     "EXECUTION_FEASIBILITY.csv": ["fixture_id","league","feasible"],
-    # Only require these two; extra columns (samples_used, last_updated) are OK
-    "PER_LEAGUE_BLEND_WEIGHTS.csv": ["league","w_market"],
+    "PER_LEAGUE_BLEND_WEIGHTS.csv": ["league","w_market"], # allow extras
 }
 
 def first_path(name: str) -> str:
@@ -53,7 +54,7 @@ def check_csv(path: str, req_cols):
     missing = [c for c in req_cols if c not in have]
     if missing:
         raise ValueError(f"{path} missing required columns {missing}")
-    # Extra columns are allowed
+    # No error if there are extra columns
 
 def main():
     errors = []
@@ -65,7 +66,7 @@ def main():
         except Exception as e:
             errors.append(str(e))
 
-    # Special check for CALIBRATION_SUMMARY.csv (allow either schema)
+    # Special check for CALIBRATION_SUMMARY.csv
     cal_path = first_path("CALIBRATION_SUMMARY.csv")
     if not os.path.exists(cal_path):
         errors.append(f"{cal_path} not found")
