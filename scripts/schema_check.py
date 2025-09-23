@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-"""
-Schema check for critical artifacts before bundling.
-Fails fast if required files are missing or columns are wrong.
-"""
-
 import os, sys
 import pandas as pd
 from datetime import datetime
@@ -12,15 +7,20 @@ RUN_DATE = datetime.utcnow().strftime("%Y-%m-%d")
 RUN_DIR = os.path.join("runs", RUN_DATE)
 DATA_DIR = "data"
 
-# What to check: {filename: required_columns}
+# accept either style for calibration summary
+CAL_OK_SETS = [
+    {"metric","value"},
+    {"ece_weighted"}
+]
+
 CHECKS = {
     "PREDICTIONS_7D.csv": ["fixture_id","pH","pD","pA","oddsH","oddsD","oddsA"],
     "PREDICTIONS_BTTS_7D.csv": ["fixture_id","p_btts_yes"],
     "PREDICTIONS_TOTALS_7D.csv": ["fixture_id","p_over","p_under"],
     "CONSISTENCY_CHECKS.csv": ["fixture_id","league"],
     "ACTIONABILITY_REPORT.csv": ["fixture_id","league","stake"],
-    "COUNCIL_BRIEFING.md": None,  # content-only
-    "CALIBRATION_SUMMARY.csv": ["metric","value"],  # or ece_weighted depending on script
+    "COUNCIL_BRIEFING.md": None,
+    # we'll validate CALIBRATION_SUMMARY in custom logic below
     "ROI_BY_SLICE.csv": None,
     "ODDS_COVERAGE_REPORT.csv": None,
     "DATA_QUALITY_REPORT.csv": None,
@@ -38,21 +38,39 @@ def check_csv(path, req_cols):
     if req_cols is None:
         return
     df = pd.read_csv(path, nrows=1)
-    missing = [c for c in req_cols if c not in df.columns]
+    have = set(df.columns)
+    missing = [c for c in req_cols if c not in have]
     if missing:
         raise ValueError(f"{path} missing required columns {missing}")
 
+def first_path(name):
+    path_run = os.path.join(RUN_DIR, name)
+    path_data = os.path.join(DATA_DIR, name)
+    return path_run if os.path.exists(path_run) else path_data
+
 def main():
     errors = []
+
+    # Standard checks
     for fname, cols in CHECKS.items():
-        # look in RUN dir first, then data/ as fallback
-        path_run = os.path.join(RUN_DIR, fname)
-        path_data = os.path.join(DATA_DIR, fname)
-        path = path_run if os.path.exists(path_run) else path_data
         try:
-            check_csv(path, cols)
+            check_csv(first_path(fname), cols)
         except Exception as e:
             errors.append(str(e))
+
+    # Special check for CALIBRATION_SUMMARY (accept either schema)
+    cal_path = first_path("CALIBRATION_SUMMARY.csv")
+    if not os.path.exists(cal_path):
+        errors.append(f"{cal_path} not found")
+    else:
+        try:
+            df = pd.read_csv(cal_path, nrows=1)
+            have = set(df.columns)
+            if not any(ok.issubset(have) for ok in CAL_OK_SETS):
+                errors.append(f"{cal_path} has unexpected columns {sorted(have)}")
+        except Exception as e:
+            errors.append(f"{cal_path} unreadable: {e}")
+
     if errors:
         print("❌ Schema check failed:")
         for e in errors:
