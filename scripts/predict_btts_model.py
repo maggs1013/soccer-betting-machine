@@ -1,104 +1,168 @@
 #!/usr/bin/env python3
-import os, json
-import pandas as pd
-import numpy as np
-from datetime import datetime
-import joblib
-from sklearn.isotonic import IsotonicRegression
+"""
+predict_btts_model.py
+Score upcoming fixtures with per-league BTTS models.
 
-DATA_DIR = "data"
+Reads (data/):
+  UPCOMING_7D_enriched.csv
+  xg_metrics_hybrid.csv
+  team_statsbomb_features.csv
+  sd_538_spi.csv
+  team_form_features.csv
+  models_btts/btts_model__{league}.joblib
+  models_btts/btts_model__{league}.job.json
+
+Writes:
+  runs/YYYY-MM-DD/PREDICTIONS_BTTS_7D.csv   (fixture_id, league, p_model, p_btts_yes)
+"""
+
+import os, json
+import numpy as np
+import pandas as pd
+import joblib
+from datetime import datetime
+
+DATA = "data"
 RUN_DIR = os.path.join("runs", datetime.utcnow().strftime("%Y-%m-%d"))
 os.makedirs(RUN_DIR, exist_ok=True)
 
-INPUT_ENRICHED = os.path.join(DATA_DIR, "enriched_fixtures.csv")
-ODDS_CSV = os.path.join(DATA_DIR, "odds_upcoming.csv")  # unified odds from your consolidate_odds
+UP   = os.path.join(DATA, "UPCOMING_7D_enriched.csv")
+HYB  = os.path.join(DATA, "xg_metrics_hybrid.csv")
+SBF  = os.path.join(DATA, "team_statsbomb_features.csv")
+SPI  = os.path.join(DATA, "sd_538_spi.csv")
+FORM = os.path.join(DATA, "team_form_features.csv")
+MODEL_DIR = os.path.join(DATA, "models_btts")
+
 LEAGUE_COL = "league"
-ID_COL = "fixture_id"
-FEATURES_KEY = "features"
+BASE_FEATS = [
+    "xg_hybrid","xga_hybrid","xgd90_hybrid",
+    "xa_sb","psxg_minus_goals_sb","setpiece_share",
+    "spi_off","spi_def",
+    "last5_ppg","last5_xgpg","last5_xgapg",
+    "last10_ppg","last10_xgpg","last10_xgapg",
+]
 
-MODEL_DIR = os.path.join(DATA_DIR, "models_btts")
-CAL_DIR = os.path.join(DATA_DIR, "calibration_btts")
-os.makedirs(CAL_DIR, exist_ok=True)
+def safe_read(p, cols=None):
+    if not os.path.exists(p):
+        return pd.DataFrame(columns=cols or [])
+    try:
+        df = pd.read_csv(p)
+    except Exception:
+        return pd.DataFrame(columns=cols or [])
+    if cols:
+        for c in cols:
+            if c not in df.columns:
+                df[c] = np.nan
+    return df
 
-# market prior field names in ODDS file
-ODDS_BTTS_Y = "odds_btts_yes"
-ODDS_BTTS_N = "odds_btts_no"
+def canonical_fixture_id(row):
+    date = str(row.get("date","NA")).replace("-","")
+    h = str(row.get("home_team","NA")).strip().lower().replace(" ","_")
+    a = str(row.get("away_team","NA")).strip().lower().replace(" ","_")
+    return f"{date}__{h}__vs__{a}"
 
-def implied_prob(o):
-    out = np.where(o>0, 1.0/o, np.nan)
-    return out
+def build_team_vectors():
+    hyb = safe_read(HYB, ["team","xg_hybrid","xga_hybrid","xgd90_hybrid"])
+    sbf = safe_read(SBF, ["team","xa_sb","psxg_minus_goals_sb","setpiece_xg_sb","openplay_xg_sb"])
+    spi = safe_read(SPI)
+    form = safe_read(FORM, ["team","last5_ppg","last5_xgpg","last5_xgapg","last10_ppg","last10_xgpg","last10_xgapg"])
 
-def vig_strip(p):
-    if not np.isfinite(p).all():
-        return p
-    s = np.nansum(p, axis=1, keepdims=True)
-    return np.divide(p, s, out=np.full_like(p, np.nan), where=s>0)
+    spi_cols = {c.lower(): c for c in spi.columns}
+    if "team" not in spi.columns:
+        if "squad" in spi.columns: spi = spi.rename(columns={"squad":"team"})
+        elif "team_name" in spi.columns: spi = spi.rename(columns={"team_name":"team"})
+    off_col = spi_cols.get("off") or spi_cols.get("offense")
+    def_col = spi_cols.get("def")  or spi_cols.get("defense")
+    spi_small = pd.DataFrame(columns=["team","spi_off","spi_def"])
+    if "team" in spi.columns and off_col and def_col:
+        spi_small = spi.groupby("team", as_index=False)[[off_col,def_col]].mean()
+        spi_small = spi_small.rename(columns={off_col:"spi_off", def_col:"spi_def"})
 
-def load_model(league):
-    path = os.path.join(MODEL_DIR, f"btts_model__{league}.joblib")
-    if os.path.exists(path):
-        return joblib.load(path)
-    return None
+    teamvec = pd.DataFrame({
+        "team": pd.unique(pd.concat([hyb["team"], sbf["team"], spi_small["team"], form["team"]], ignore_index=True).dropna())
+    })
+    if teamvec.empty: return teamvec
 
-def per_league_isotonic_fit(df, league):
-    # Fit isotonic on recent history in that league (where label exists)
-    sub = df[(df[LEAGUE_COL]==league) & df["is_train"].eq(1) & df["btts_y"].isin([0,1])]
-    if len(sub)<200: return None
-    iso = IsotonicRegression(out_of_bounds="clip")
-    iso.fit(sub["p_model"].values, sub["btts_y"].values)
-    return iso
+    teamvec = teamvec.merge(hyb, on="team", how="left")
+    if not sbf.empty:
+        sbf2 = sbf.groupby("team", as_index=False).agg({
+            "xa_sb":"mean","psxg_minus_goals_sb":"mean","setpiece_xg_sb":"mean","openplay_xg_sb":"mean"
+        })
+        tot = (sbf2["setpiece_xg_sb"] + sbf2["openplay_xg_sb"]).replace(0,np.nan)
+        sbf2["setpiece_share"] = (sbf2["setpiece_xg_sb"]/tot).fillna(0.0)
+        teamvec = teamvec.merge(sbf2[["team","xa_sb","psxg_minus_goals_sb","setpiece_share"]], on="team", how="left")
+    if not spi_small.empty:
+        teamvec = teamvec.merge(spi_small, on="team", how="left")
+    if not form.empty:
+        teamvec = teamvec.merge(form, on="team", how="left")
+
+    for c in BASE_FEATS:
+        if c not in teamvec.columns:
+            teamvec[c] = np.nan
+    return teamvec
 
 def main():
-    fixtures = pd.read_csv(INPUT_ENRICHED)
-    odds = pd.read_csv(ODDS_CSV)
-    df = fixtures.merge(odds[[ID_COL, ODDS_BTTS_Y, ODDS_BTTS_N]], on=ID_COL, how="left")
+    up = safe_read(UP)
+    if up.empty:
+        pd.DataFrame(columns=["fixture_id","league","p_model","p_btts_yes"]).to_csv(os.path.join(RUN_DIR,"PREDICTIONS_BTTS_7D.csv"), index=False)
+        print("[WARN] UPCOMING_7D_enriched.csv missing/empty; wrote empty PREDICTIONS_BTTS_7D.csv")
+        return
+    if LEAGUE_COL not in up.columns:
+        up[LEAGUE_COL] = "GLOBAL"
+    if "fixture_id" not in up.columns:
+        up["fixture_id"] = up.apply(canonical_fixture_id, axis=1)
 
-    pred_rows = []
-    for lg, g in df.groupby(LEAGUE_COL):
-        model = load_model(lg)
-        if model is None:
-            continue
-        feats = joblib.load(os.path.join(MODEL_DIR, f"btts_model__{lg}.joblib"))
-        # model pipeline has feature order embedded; pull features json for robust selection
-        meta_json = os.path.join(MODEL_DIR, f"btts_model__{lg}.job.json")
-        features = joblib.load(os.path.join(MODEL_DIR, f"btts_model__{lg}.joblib")).named_steps["ss"].get_feature_names_out() \
-                   if hasattr(feats.named_steps["ss"], "get_feature_names_out") else None
-        try:
-            with open(meta_json) as f:
-                meta = json.load(f)
-                feat_list = meta.get("features")
-        except Exception:
-            feat_list = None
+    tv = build_team_vectors()
+    if tv.empty:
+        pd.DataFrame(columns=["fixture_id","league","p_model","p_btts_yes"]).to_csv(os.path.join(RUN_DIR,"PREDICTIONS_BTTS_7D.csv"), index=False)
+        print("[WARN] No team vectors; wrote empty PREDICTIONS_BTTS_7D.csv")
+        return
 
-        use_cols = feat_list if feat_list else [c for c in g.columns if c not in (ID_COL, LEAGUE_COL)]
-        X = g[use_cols].fillna(0).values
-        p_model = model.predict_proba(X)[:,1]
-        gg = g.copy()
-        gg["p_model"] = p_model
-
-        # market prior
-        market = gg[[ODDS_BTTS_Y, ODDS_BTTS_N]].copy()
-        m = np.column_stack([implied_prob(market[ODDS_BTTS_Y].values),
-                             implied_prob(market[ODDS_BTTS_N].values)])
-        m = vig_strip(m)
-        p_yes_market = m[:,0] if m.shape[1]>=1 else np.nan
-
-        # simple blend weight (can be replaced by per-league learned w_market)
-        w_market = 0.5
-        gg["p_blend_raw"] = w_market * p_yes_market + (1-w_market) * gg["p_model"]
-
-        # isotonic calibration per league
-        iso = per_league_isotonic_fit(fixtures, lg)
-        if iso is not None:
-            gg["p_btts_yes"] = iso.transform(gg["p_blend_raw"])
+    # Build feature rows per fixture
+    feat_cols = [f"home_{c}" for c in BASE_FEATS] + [f"away_{c}" for c in BASE_FEATS]
+    rows = []
+    for r in up.itertuples(index=False):
+        ht, at, lg = getattr(r, "home_team", None), getattr(r, "away_team", None), getattr(r, LEAGUE_COL)
+        fid = getattr(r, "fixture_id", None)
+        hv = tv[tv["team"]==ht].head(1)
+        av = tv[tv["team"]==at].head(1)
+        if hv.empty or av.empty:
+            feat = {col: np.nan for col in feat_cols}
         else:
-            gg["p_btts_yes"] = gg["p_blend_raw"]
+            feat = {}
+            for c in BASE_FEATS:
+                feat[f"home_{c}"] = hv[c].iloc[0]
+                feat[f"away_{c}"] = av[c].iloc[0]
+        feat["fixture_id"] = fid
+        feat["league"] = lg
+        rows.append(feat)
+    Xdf = pd.DataFrame(rows)
 
-        pred_rows.append(gg[[ID_COL, LEAGUE_COL, "p_model", "p_btts_yes"]])
+    # Predict per league
+    preds = []
+    for lg, g in Xdf.groupby("league"):
+        mdl_path = os.path.join(MODEL_DIR, f"btts_model__{lg}.joblib")
+        meta_path = os.path.join(MODEL_DIR, f"btts_model__{lg}.job.json")
+        if not os.path.exists(mdl_path):
+            continue
+        pipe = joblib.load(mdl_path)
+        with open(meta_path, "r") as f:
+            meta = json.load(f)
+        feats = meta["features"]
+        X = g[feats].values
+        # pipe has imputer+scaler+lr, so we can just predict
+        p = pipe.predict_proba(X)[:,1]
+        tmp = pd.DataFrame({
+            "fixture_id": g["fixture_id"].values,
+            "league": g["league"].values,
+            "p_model": p,
+            "p_btts_yes": p  # (optionally blend with market later)
+        })
+        preds.append(tmp)
 
-    out = pd.concat(pred_rows, ignore_index=True) if pred_rows else pd.DataFrame(columns=[ID_COL, LEAGUE_COL, "p_model", "p_btts_yes"])
+    out = pd.concat(preds, ignore_index=True) if preds else pd.DataFrame(columns=["fixture_id","league","p_model","p_btts_yes"])
     out.to_csv(os.path.join(RUN_DIR, "PREDICTIONS_BTTS_7D.csv"), index=False)
-    print("BTTS predictions written.")
+    print("[OK] PREDICTIONS_BTTS_7D.csv written:", len(out))
 
 if __name__ == "__main__":
     main()
