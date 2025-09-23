@@ -49,10 +49,9 @@ def main():
         write_empty_model([], "HIST empty")
         return
 
-    # Use current team-level features (stationary approximation)
+    # Team-level sources
     hyb = safe_read(HYB, ["team","xg_hybrid","xga_hybrid","xgd90_hybrid"])
     sbf = safe_read(SBF, ["team","xa_sb","psxg_minus_goals_sb","setpiece_xg_sb","openplay_xg_sb"])
-
     spi = safe_read(SPI)
     spi_cols = {c.lower(): c for c in spi.columns}
     if "team" not in spi.columns:
@@ -65,7 +64,7 @@ def main():
         spi_small = spi.groupby("team", as_index=False)[[off_col,def_col]].mean()
         spi_small = spi_small.rename(columns={off_col:"spi_off", def_col:"spi_def"})
 
-    form = safe_read(FORM, ["team","last5_ppg","last10_ppg","last5_xgpg","last5_xgapg","last10_xgpg","last10_xgapg"])
+    form = safe_read(FORM, ["team","last5_ppg","last10_ppg","last5_xgpg","last10_xgpg","last5_xgapg","last10_xgapg"])
 
     # Merge into one team vector table
     teamvec = pd.DataFrame({"team": pd.unique(pd.concat([
@@ -92,13 +91,26 @@ def main():
     if not form.empty:
         teamvec = teamvec.merge(form, on="team", how="left")
 
-    # Feature columns to use (home_minus_away diffs later)
+    # Derived momentum features (if base columns exist)
+    if "last5_ppg" in teamvec.columns and "last10_ppg" in teamvec.columns:
+        teamvec["ppg_momentum"] = teamvec["last5_ppg"] - teamvec["last10_ppg"]
+    else:
+        teamvec["ppg_momentum"] = np.nan
+
+    if "last5_xgpg" in teamvec.columns and "last10_xgpg" in teamvec.columns:
+        teamvec["xg_momentum"] = teamvec["last5_xgpg"] - teamvec["last10_xgpg"]
+    else:
+        teamvec["xg_momentum"] = np.nan
+
+    # Base numeric features (home_minus_away diffs later)
     numeric_cols = [
         "xg_hybrid","xga_hybrid","xgd90_hybrid",
         "xa_sb","psxg_minus_goals_sb","setpiece_share",
         "spi_off","spi_def",
         "last5_ppg","last10_ppg","last5_xgpg","last5_xgapg",
-        "last10_ppg","last10_xgpg","last10_xgapg"
+        "last10_ppg","last10_xgpg","last10_xgapg",
+        # new derived:
+        "ppg_momentum","xg_momentum"
     ]
     for c in numeric_cols:
         if c not in teamvec.columns:
@@ -115,7 +127,7 @@ def main():
         hv = teamvec[teamvec["team"]==ht].head(1)
         av = teamvec[teamvec["team"]==at].head(1)
         if hv.empty or av.empty:
-            continue  # no team vector → skip
+            continue
         diffs = (hv[numeric_cols].values - av[numeric_cols].values)[0]
         samples.append(diffs); labels.append(lab)
 
@@ -130,29 +142,26 @@ def main():
     row_ok = ~np.isnan(X).all(axis=1)
     X = X[row_ok]; y2 = y2[row_ok]
 
-    # Need enough data + all three classes for multinomial
+    # Need enough data + all three classes
     if X.size == 0 or np.unique(y2).size < 3:
         write_empty_model([f"diff_{c}" for c in numeric_cols], "Not enough clean samples/classes")
         return
 
-    # Column-median imputation for remaining NaNs; if a column is entirely NaN, use 0.0
+    # Column-median imputation for remaining NaNs; column all-NaN -> 0.0
     col_medians = np.nanmedian(X, axis=0)
     col_medians = np.where(np.isfinite(col_medians), col_medians, 0.0)
     nr, nc = np.where(np.isnan(X))
     if nr.size:
         X[nr, nc] = col_medians[nc]
 
-    # Scale and fit
     scaler = StandardScaler()
     Xs = scaler.fit_transform(X)
 
     clf = LogisticRegression(multi_class="multinomial", max_iter=200, solver="lbfgs")
     clf.fit(Xs, y2)
 
-    # Persist model with same structure
     pickle.dump({"scaler": scaler, "model": clf, "feat_names": [f"diff_{c}" for c in numeric_cols]}, open(OUTM, "wb"))
     json.dump({"feat_names": [f"diff_{c}" for c in numeric_cols]}, open(OUTF, "w"))
-
     print(f"[OK] trained feature model with {Xs.shape[0]} samples, {Xs.shape[1]} features → {OUTM}")
 
 if __name__ == "__main__":
