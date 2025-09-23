@@ -217,7 +217,7 @@ jobs:
           test -f runs/${{ env.RUN_DATE }}/ANTI_MODEL_VETOES.csv || echo "slice,reason" > runs/${{ env.RUN_DATE }}/ANTI_MODEL_VETOES.csv
 
       # ---------- Always (re)write blend weights immediately before schema gate ----------
-      - name: Sanity: (re)write blend weights + show paths
+      - name: Sanity (re)write blend weights + show paths
         run: |
           python scripts/per_league_blend_weights.py
           ls -l data/PER_LEAGUE_BLEND_WEIGHTS.csv || true
