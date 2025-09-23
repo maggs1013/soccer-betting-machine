@@ -19,7 +19,6 @@ CAL_OK_SETS = [
     {"ece_weighted"}
 ]
 
-# What to check: {filename: required_columns}
 # Only require the *critical* subset; extras are OK
 CHECKS = {
     "PREDICTIONS_7D.csv": ["fixture_id","pH","pD","pA","oddsH","oddsD","oddsA"],
@@ -27,16 +26,16 @@ CHECKS = {
     "PREDICTIONS_TOTALS_7D.csv": ["fixture_id","p_over","p_under"],
     "CONSISTENCY_CHECKS.csv": ["fixture_id","league"],
     "ACTIONABILITY_REPORT.csv": ["fixture_id","league","stake"],
-    "COUNCIL_BRIEFING.md": None,                 # presence-only
+    "COUNCIL_BRIEFING.md": None,
     "ROI_BY_SLICE.csv": None,
     "ODDS_COVERAGE_REPORT.csv": None,
     "DATA_QUALITY_REPORT.csv": None,
-    "ANTI_MODEL_VETOES.csv": ["slice","reason"], # minimal gate
+    "ANTI_MODEL_VETOES.csv": ["slice","reason"],
     "FEATURE_IMPORTANCE.csv": None,
     "FEATURE_DRIFT.csv": None,
     "LINE_MOVE_LOG.csv": None,
     "EXECUTION_FEASIBILITY.csv": ["fixture_id","league","feasible"],
-    "PER_LEAGUE_BLEND_WEIGHTS.csv": ["league","w_market"], # allow extras
+    "PER_LEAGUE_BLEND_WEIGHTS.csv": ["league","w_market"],
 }
 
 def first_path(name: str) -> str:
@@ -54,7 +53,7 @@ def check_csv(path: str, req_cols):
     missing = [c for c in req_cols if c not in have]
     if missing:
         raise ValueError(f"{path} missing required columns {missing}")
-    # No error if there are extra columns
+    # Extra columns are allowed
 
 def main():
     errors = []
