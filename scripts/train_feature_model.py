@@ -2,7 +2,7 @@
 # Train a multinomial logistic feature model using multiple windows & contrasts,
 # with time-decay weighting so recent matches matter more.
 #
-# Robust: if HIST has no 'league' column, we create league='GLOBAL' and proceed.
+# Robust to missing 'league' in HIST and to missing rolling-window columns.
 
 import os, json, pickle
 import numpy as np
@@ -19,7 +19,7 @@ FORM = os.path.join(DATA, "team_form_features.csv")
 OUTM = os.path.join(DATA, "feature_model.pkl")
 OUTF = os.path.join(DATA, "feature_model_features.json")
 
-HALF_LIFE_DAYS = 180.0  # adjust to tune recency weighting
+HALF_LIFE_DAYS = 180.0  # recency weighting half-life
 
 def safe_read(p, cols=None):
     if not os.path.exists(p):
@@ -48,11 +48,9 @@ def build_team_windows_from_hist(H):
     H["date"] = pd.to_datetime(H["date"], errors="coerce")
     H = H.dropna(subset=["date"]).sort_values("date")
 
-    # Ensure 'league' is present so downstream merges/selects are safe
     if "league" not in H.columns:
         H["league"] = "GLOBAL"
 
-    # long format
     h = H[["date","home_team","home_goals","away_goals","league"]].rename(
         columns={"home_team":"team","home_goals":"gf"})
     h["ga"] = H["away_goals"]
@@ -70,17 +68,20 @@ def build_team_windows_from_hist(H):
     for team, g in long.groupby("team"):
         g = g.sort_values("date")
         row = {"team": team}
-        # PPG windows
         for n in (3,5,7,10):
             row[f"last{n}_ppg"] = g["pts"].rolling(n, min_periods=1).mean().iloc[-1]
-        # season ppg
         season = g["season"].iloc[-1]
         g_season = g[g["season"] == season]
         row["season_ppg"] = g_season["pts"].mean() if not g_season.empty else np.nan
-        # goal volatility
         row["goal_volatility_5"]  = g["gf"].rolling(5,  min_periods=2).var().iloc[-1]
         row["goal_volatility_10"] = g["gf"].rolling(10, min_periods=2).var().iloc[-1]
         rows.append(row)
+
+    # Even if no teams, return a DataFrame with expected columns for downstream safety
+    if not rows:
+        cols = ["team","last3_ppg","last5_ppg","last7_ppg","last10_ppg","season_ppg",
+                "goal_volatility_5","goal_volatility_10"]
+        return pd.DataFrame(columns=cols)
     return pd.DataFrame(rows)
 
 def main():
@@ -107,68 +108,77 @@ def main():
         spi_small = spi.groupby("team", as_index=False)[[off_col,def_col]].mean()
         spi_small = spi_small.rename(columns={off_col:"spi_off", def_col:"spi_def"})
 
-    form = safe_read(FORM, ["team","last5_xgpg"])  # optional xG context
+    form = safe_read(FORM, ["team","last5_xgpg"])
 
-    # merge to build teamvec
+    # base team list
     teamvec = pd.DataFrame({"team": pd.unique(pd.concat([hyb["team"], sbf["team"], spi_small["team"]], ignore_index=True).dropna())})
     if teamvec.empty:
         write_empty_model([], "No team vectors available")
         return
+
+    # merge sources
     teamvec = teamvec.merge(hyb, on="team", how="left")
     if not sbf.empty:
-        sbf2 = sbf.groupby("team", as_index=False).agg({"xa_sb":"mean","psxg_minus_goals_sb":"mean","setpiece_xg_sb":"mean","openplay_xg_sb":"mean"})
+        sbf2 = sbf.groupby("team", as_index=False).agg({
+            "xa_sb":"mean","psxg_minus_goals_sb":"mean","setpiece_xg_sb":"mean","openplay_xg_sb":"mean"
+        })
         tot = (sbf2["setpiece_xg_sb"] + sbf2["openplay_xg_sb"]).replace(0, np.nan)
         sbf2["setpiece_share"] = (sbf2["setpiece_xg_sb"]/tot).fillna(0.0)
         teamvec = teamvec.merge(sbf2[["team","xa_sb","psxg_minus_goals_sb","setpiece_share"]], on="team", how="left")
     if not spi_small.empty:
         teamvec = teamvec.merge(spi_small, on="team", how="left")
 
-    # derive windows from HIST (PPG windows, volatility)
+    # windows from HIST
     tv_win = build_team_windows_from_hist(hist)
     teamvec = teamvec.merge(tv_win, on="team", how="left")
 
-    # xG proxy (we only have last5_xgpg in FORM)
-    if not form.empty:
-        teamvec = teamvec.merge(form, on="team", how="left")
-        teamvec["last5_xgpg"] = teamvec["last5_xgpg"].where(np.isfinite(teamvec["last5_xgpg"]), np.nan)
-    else:
-        teamvec["last5_xgpg"] = np.nan
+    # ensure expected window columns exist even if tv_win was empty
+    expected_win_cols = [
+        "last3_ppg","last5_ppg","last7_ppg","last10_ppg","season_ppg",
+        "goal_volatility_5","goal_volatility_10",
+        "last3_xgpg","last5_xgpg","last7_xgpg","last10_xgpg","season_xgpg"
+    ]
+    for c in expected_win_cols:
+        if c not in teamvec.columns:
+            teamvec[c] = np.nan
 
-    # Add contrasts
+    # xG proxy from form (last5_xgpg only)
+    if not form.empty:
+        teamvec = teamvec.merge(form, on="team", how="left", suffixes=("", "_form"))
+        # prefer value if original is NaN
+        teamvec["last5_xgpg"] = np.where(teamvec["last5_xgpg"].notna(), teamvec["last5_xgpg"], teamvec["last5_xgpg_form"])
+        teamvec.drop(columns=[c for c in teamvec.columns if c.endswith("_form")], inplace=True, errors="ignore")
+
+    # contrasts
     teamvec["ppg_momentum_3_10"]     = teamvec["last3_ppg"]  - teamvec["last10_ppg"]
     teamvec["ppg_momentum_5_season"] = teamvec["last5_ppg"]  - teamvec["season_ppg"]
-    teamvec["xg_momentum_3_10"]      = teamvec.get("last3_xgpg", np.nan) - teamvec.get("last10_xgpg", np.nan)
-    teamvec["xg_momentum_5_season"]  = teamvec["last5_xgpg"] - teamvec.get("season_xgpg", np.nan)
+    teamvec["xg_momentum_3_10"]      = teamvec["last3_xgpg"] - teamvec["last10_xgpg"]
+    teamvec["xg_momentum_5_season"]  = teamvec["last5_xgpg"] - teamvec["season_xgpg"]
 
-    # Assemble compact, high-signal feature list
+    # feature list (compact but informative)
     numeric_cols = [
-        # core quality
         "xg_hybrid","xga_hybrid","xgd90_hybrid",
         "xa_sb","psxg_minus_goals_sb","setpiece_share",
         "spi_off","spi_def",
-        # windows
         "last3_ppg","last5_ppg","last10_ppg","season_ppg",
-        # contrasts
         "ppg_momentum_3_10","ppg_momentum_5_season",
-        # volatility proxy
         "goal_volatility_5","goal_volatility_10",
-        # minimal xG window presence
         "last5_xgpg"
     ]
     for c in numeric_cols:
         if c not in teamvec.columns:
             teamvec[c] = np.nan
 
-    # Labels 0/1/2
+    # labels 0/1/2
     y = np.where(hist["home_goals"]>hist["away_goals"],0,
          np.where(hist["home_goals"]==hist["away_goals"],1,2))
 
-    # Build diff matrix
+    # build diffs
     samples, labels, dates = [], [], []
     for r, lab in zip(hist.itertuples(index=False), y):
         hv = teamvec[teamvec["team"]==r.home_team].head(1)
         av = teamvec[teamvec["team"]==r.away_team].head(1)
-        if hv.empty or av.empty: 
+        if hv.empty or av.empty:
             continue
         diffs = (hv[numeric_cols].values - av[numeric_cols].values)[0]
         samples.append(diffs); labels.append(lab); dates.append(r.date)
@@ -188,7 +198,7 @@ def main():
         write_empty_model([f"diff_{c}" for c in numeric_cols], "Not enough clean samples/classes")
         return
 
-    # impute
+    # impute missing cells
     col_medians = np.nanmedian(X, axis=0)
     col_medians = np.where(np.isfinite(col_medians), col_medians, 0.0)
     nr, nc = np.where(np.isnan(X))
