@@ -36,21 +36,18 @@ def elo_prob(Rh, Ra, ha=60.0):
     pH = (1.0 - pD) * pH_core
     pA = 1.0 - pH - pD
     eps = 1e-6
-    return (max(eps, min(1-eps, pH)),
-            max(eps, min(1-eps, pD)),
-            max(eps, min(1-eps, pA)))
+    return (max(eps, min(1-eps, pH)), max(eps, min(1-eps, pD)), max(eps, min(1-eps, pA)))
 
 def build_elo(df):
     R = {}
     for r in df.itertuples(index=False):
         h, a = r.home_team, r.away_team
-        R.setdefault(h, 1500.0); R.setdefault(a, 1500.0)
+        R.setdefault(h,1500.0); R.setdefault(a,1500.0)
         Eh = 1.0/(1.0 + 10.0 ** (-((R[h]-R[a]+60)/400.0)))
         if pd.isna(r.home_goals) or pd.isna(r.away_goals): continue
         score = 1.0 if r.home_goals > r.away_goals else (0.5 if r.home_goals == r.away_goals else 0.0)
         K = 20
-        R[h] = R[h] + K*(score - Eh)
-        R[a] = R[a] + K*((1.0 - score) - (1.0 - Eh))
+        R[h] = R[h] + K*(score - Eh); R[a] = R[a] + K*((1.0 - score) - (1.0 - Eh))
     return R
 
 def kelly(p, odds, cap=0.05):
@@ -131,9 +128,9 @@ def main():
 
             if not np.isfinite(odds) or p <= 0:
                 stakes.append(0.0); pnls.append(0.0); chosen_odds.append(np.nan); continue
-            k = kelly(p, odds, cap=0.05)
+            k = kelly(p,odds,cap=0.05)
             stakes.append(k); chosen_odds.append(odds)
-            pnls.append((odds - 1.0)*k if res==1 else -k)
+            pnls.append((odds-1.0)*k if res==1 else -k)
 
         d2 = dL.copy()
         d2["stake"] = stakes; d2["pnl"] = pnls; d2["chosen_odds"] = chosen_odds
@@ -154,7 +151,6 @@ def main():
                     "reason": f"ROI {roi:.3f} < -0.02 on {n} bets"
                 })
 
-    # Write detailed + minimal; mirror to runs/
     pd.DataFrame(rows).to_csv(VETO_FULL_DATA, index=False)
     pd.DataFrame(simple_rows if simple_rows else [], columns=["slice","reason"]).to_csv(VETO_MIN_DATA, index=False)
     pd.read_csv(VETO_FULL_DATA).to_csv(VETO_FULL_RUN, index=False)
