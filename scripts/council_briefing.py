@@ -5,7 +5,7 @@ import numpy as np
 from datetime import datetime
 
 RUN_DIR = os.path.join("runs", datetime.utcnow().strftime("%Y-%m-%d"))
-OUT = os.path.join(RUN_DIR, "COUNCIL_BRIEFING.md")
+OUT = os.path.join(RUN_DIR, "AUTO_BRIEFING.md")  # renamed output
 
 # ---------- helpers ----------
 
@@ -23,22 +23,16 @@ def safe_read(path, cols=None):
         return pd.DataFrame(columns=cols or [])
 
 def df_to_md(df):
-    """
-    Try pandas.to_markdown (needs tabulate). If not available, render a simple pipe table.
-    """
+    """to_markdown fallback (no tabulate needed)."""
     if df is None or len(df) == 0:
         return "_(no rows)_"
     try:
-        # pandas requires 'tabulate' for to_markdown
         return df.to_markdown(index=False)
     except Exception:
-        # Fallback: simple Markdown table
         cols = list(df.columns)
         lines = []
-        # header
         lines.append("| " + " | ".join(cols) + " |")
         lines.append("| " + " | ".join(["---"] * len(cols)) + " |")
-        # rows
         for _, r in df.iterrows():
             vals = ["" if pd.isna(v) else str(v) for v in r.tolist()]
             lines.append("| " + " | ".join(vals) + " |")
@@ -57,7 +51,7 @@ def top_edges(preds, prob_col, stake_col="stake", n=5):
 # ---------- main ----------
 
 def main():
-    # Load (be robust if files are missing)
+    # Load (robust if files are missing)
     p1x2 = safe_read(os.path.join(RUN_DIR, "PREDICTIONS_7D.csv"))
     btts = safe_read(os.path.join(RUN_DIR, "PREDICTIONS_BTTS_7D.csv"), ["fixture_id","league","p_btts_yes"])
     tot  = safe_read(os.path.join(RUN_DIR, "PREDICTIONS_TOTALS_7D.csv"), ["fixture_id","league","p_over","p_under"])
@@ -65,8 +59,9 @@ def main():
     cal  = safe_read(os.path.join(RUN_DIR, "CALIBRATION_SUMMARY.csv"))
     cons = safe_read(os.path.join(RUN_DIR, "CONSISTENCY_CHECKS.csv"))
     risk = safe_read(os.path.join(RUN_DIR, "EXECUTION_FEASIBILITY.csv"))
+    idxj = safe_read(os.path.join(RUN_DIR, "_INDEX.json"))  # may not be CSV
 
-    # Ensure columns that we reference exist
+    # Ensure columns we reference exist
     for col in ["fixture_id","league"]:
         for df in (p1x2, btts, tot, act, cons, risk):
             if col not in df.columns:
@@ -74,12 +69,31 @@ def main():
     if "stake" not in act.columns:
         act["stake"] = 0.0
     if "pH" not in act.columns and "pH" in p1x2.columns:
-        # If ACTIONABILITY_REPORT lacks pH, merge a light view to rank top 1X2 edges
         act = act.merge(p1x2[["fixture_id","league","pH","pD","pA"]], on=["fixture_id","league"], how="left")
 
-    # Compose briefing
+    # Compose the document
     buf = io.StringIO()
-    buf.write(f"# COUNCIL BRIEFING — {datetime.utcnow().strftime('%Y-%m-%d')} UTC\n\n")
+    buf.write(f"# AUTO_BRIEFING — {datetime.utcnow().strftime('%Y-%m-%d')} UTC\n\n")
+    buf.write("> **Disclaimer:** This is an **automated pipeline summary** for triage only.\n")
+    buf.write("> The Council’s real briefing happens in Stages 5–7 — this file is **not binding**.\n\n")
+
+    # Morning checklist (from _INDEX.json if present)
+    buf.write("## Morning Checklist (auto)\n")
+    try:
+        # if _INDEX.json exists, show key items
+        import json
+        jpath = os.path.join(RUN_DIR, "_INDEX.json")
+        if os.path.exists(jpath):
+            J = json.load(open(jpath, "r"))
+            keys = ["n_fixtures","n_edges","feasibility_pct","ece_weighted","consistency_flags","veto_slices","coverage_hint"]
+            K = {k: J.get(k, None) for k in keys}
+            df_chk = pd.DataFrame([K])
+            buf.write(df_to_md(df_chk))
+        else:
+            buf.write("_No _INDEX.json available._")
+    except Exception:
+        buf.write("_Unable to parse _INDEX.json._")
+    buf.write("\n\n")
 
     # Top edges
     buf.write("## Top Edges (by stake)\n")
@@ -114,10 +128,8 @@ def main():
     # Consistency flags
     buf.write("\n\n## Consistency Flags\n")
     if not cons.empty:
-        if "flag_goals_vs_totals" not in cons.columns:
-            cons["flag_goals_vs_totals"] = 0
-        if "flag_over_vs_btts" not in cons.columns:
-            cons["flag_over_vs_btts"] = 0
+        if "flag_goals_vs_totals" not in cons.columns: cons["flag_goals_vs_totals"] = 0
+        if "flag_over_vs_btts" not in cons.columns: cons["flag_over_vs_btts"] = 0
         fl = cons[(cons["flag_goals_vs_totals"]==1) | (cons["flag_over_vs_btts"]==1)]
         if len(fl):
             cols = [c for c in ["fixture_id","league","flag_goals_vs_totals","flag_over_vs_btts"] if c in fl.columns]
@@ -135,10 +147,9 @@ def main():
     else:
         buf.write("_No feasibility data._\n")
 
-    # Save
     with open(OUT, "w") as f:
         f.write(buf.getvalue())
-    print("COUNCIL_BRIEFING.md written:", OUT)
+    print("AUTO_BRIEFING.md written:", OUT)
 
 if __name__ == "__main__":
     main()
