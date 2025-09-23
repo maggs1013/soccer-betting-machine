@@ -108,7 +108,6 @@ jobs:
       - name: Enrich features (merge injuries/refs/stadium + SB team features)
         run: python scripts/enrich_features.py
 
-      # NEW: engineer extra variables into UPCOMING_7D_enriched.csv
       - name: Engineer extra variables
         run: python scripts/engineer_extra_variables.py
 
@@ -207,7 +206,15 @@ jobs:
       - name: Stacking log (BTTS meta-weights placeholder)
         run: python scripts/stacking_log.py
 
-      - name: Council Briefing (expanded)
+      # ---- NEW triage helpers before auto-briefing ----
+      - name: Make run index (one-screen triage)
+        run: python scripts/make_run_index.py
+
+      - name: Make flags per fixture (all blockers in one sheet)
+        run: python scripts/make_flags_per_fixture.py
+
+      # ---- Auto dashboard (not binding) ----
+      - name: Pipeline dashboard (auto)
         run: python scripts/council_briefing.py
 
       - name: Ensure anti-model veto file
@@ -220,7 +227,6 @@ jobs:
           ls -l data/PER_LEAGUE_BLEND_WEIGHTS.csv || true
           ls -l runs/${{ env.RUN_DATE }}/PER_LEAGUE_BLEND_WEIGHTS.csv || true
 
-      # NEW: model accuracy reports (after predictions/backtests)
       - name: Model accuracy report
         run: python scripts/model_accuracy_report.py
 
@@ -255,7 +261,6 @@ jobs:
             data/CALIBRATION_TABLE.csv
             data/CALIBRATION_SUMMARY.csv
             data/ACTIONABILITY_REPORT.csv
-            data/COUNCIL_BRIEFING.md
             data/feature_model.pkl
             data/feature_model_features.json
             data/feature_proba_upcoming.csv
