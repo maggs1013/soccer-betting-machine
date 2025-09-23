@@ -4,6 +4,8 @@ on:
   workflow_dispatch: {}
   schedule:
     - cron: "0 9 * * *"   # daily at 09:00 UTC
+  pull_request:
+    branches: [ main ]
 
 jobs:
   build:
