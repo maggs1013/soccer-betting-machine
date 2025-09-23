@@ -7,15 +7,16 @@
 # Kelly columns are included for convenience, but risk sizing/caps should still be handled downstream.
 #
 # Inputs (data/):
-#   UPCOMING_7D_enriched.csv    (date, home_team, away_team, league?, fixture_id?)  ← canonical upcoming set
-#   feature_proba_upcoming.csv  (date, home_team, away_team, fH, fD, fA)            ← optional
-#   HIST_matches.csv            (date, home_team, away_team, home_goals, away_goals)
-#   model_blend.json            (w_market_global, w_market_leagues{league: weight})
-#   calibrator.pkl              ({"global":{"home","draw","away"}, "per_league":{lg:{...}}})
-#   odds_upcoming.csv           (fixture_id, oddsH,oddsD,oddsA, optional raw cols; optional bookmaker, num_books)
+#   UPCOMING_7D_enriched.csv
+#   feature_proba_upcoming.csv
+#   HIST_matches.csv
+#   model_blend.json
+#   calibrator.pkl
+#   odds_upcoming.csv
 #
-# Output (data/):
-#   PREDICTIONS_7D.csv          (fixture_id, date, league, home_team, away_team, pH,pD,pA, oddsH,oddsD,oddsA, kelly_H,D,A, top_kelly)
+# Outputs:
+#   data/PREDICTIONS_7D.csv
+#   runs/YYYY-MM-DD/PREDICTIONS_7D.csv
 
 import os
 import json
@@ -23,22 +24,25 @@ import pickle
 from typing import Tuple, Dict, Any
 import numpy as np
 import pandas as pd
+from datetime import datetime
 
 DATA = "data"
+RUN_DIR = os.path.join("runs", datetime.utcnow().strftime("%Y-%m-%d"))
+os.makedirs(RUN_DIR, exist_ok=True)
+
 UP   = os.path.join(DATA, "UPCOMING_7D_enriched.csv")
 FP   = os.path.join(DATA, "feature_proba_upcoming.csv")
 HIST = os.path.join(DATA, "HIST_matches.csv")
 BL   = os.path.join(DATA, "model_blend.json")
 CAL  = os.path.join(DATA, "calibrator.pkl")
 ODDS = os.path.join(DATA, "odds_upcoming.csv")
-OUT  = os.path.join(DATA, "PREDICTIONS_7D.csv")
+
+OUT_DATA = os.path.join(DATA, "PREDICTIONS_7D.csv")
+OUT_RUN  = os.path.join(RUN_DIR, "PREDICTIONS_7D.csv")
 
 EPS = 1e-9
 
-# ---------- Helpers ----------
-
 def implied(dec: float) -> float:
-    """Decimal odds -> implied prob (no error if bad)."""
     try:
         dec = float(dec)
         return 1.0 / dec if dec > 0 else np.nan
@@ -52,19 +56,16 @@ def strip_vig(ph: float, pd_: float, pa: float) -> Tuple[float,float,float]:
     return (ph/s, pd_/s, pa/s)
 
 def elo_triplet(Rh: float, Ra: float, ha: float = 60.0) -> Tuple[float,float,float]:
-    """Heuristic Elo to (pH,pD,pA)."""
     pH_core = 1.0 / (1.0 + 10.0 ** (-((Rh - Ra + ha) / 400.0)))
-    pD = 0.18 + 0.10 * np.exp(-abs(Rh - Ra) / 200.0)  # tuned draw prior decays with rating gap
+    pD = 0.18 + 0.10 * np.exp(-abs(Rh - Ra) / 200.0)
     pH = (1.0 - pD) * pH_core
     pA = 1.0 - pH - pD
-    # clamp for safety
     pH = min(max(pH, EPS), 1.0 - EPS)
     pD = min(max(pD, EPS), 1.0 - EPS)
     pA = max(EPS, 1.0 - pH - pD)
     return (pH, pD, pA)
 
 def build_elo_ratings(hist_df: pd.DataFrame) -> Dict[str, float]:
-    """Simple Elo from historical results."""
     R: Dict[str, float] = {}
     if hist_df.empty: return R
     df = hist_df.copy()
@@ -74,7 +75,6 @@ def build_elo_ratings(hist_df: pd.DataFrame) -> Dict[str, float]:
         h, a = getattr(r, "home_team"), getattr(r, "away_team")
         R.setdefault(h, 1500.0); R.setdefault(a, 1500.0)
         Rh, Ra = R[h], R[a]
-        # expected home win prob given HA
         Eh = 1.0 / (1.0 + 10.0 ** (-((Rh - Ra + 60.0) / 400.0)))
         hg, ag = getattr(r, "home_goals", np.nan), getattr(r, "away_goals", np.nan)
         if pd.isna(hg) or pd.isna(ag):
@@ -93,7 +93,6 @@ def load_json(path: str, default: Any) -> Any:
         return default
 
 def load_calibrators(path: str) -> Dict[str, Any]:
-    """Pickled dict with 'global' and 'per_league' isotonic objects (keys: home/draw/away)."""
     try:
         with open(path, "rb") as f:
             obj = pickle.load(f)
@@ -103,7 +102,6 @@ def load_calibrators(path: str) -> Dict[str, Any]:
     return {"global": {"home": None, "draw": None, "away": None}, "per_league": {}}
 
 def apply_isotonic_triplet(cal_triplet: Dict[str, Any], pH: float, pD: float, pA: float) -> Tuple[float,float,float]:
-    """Apply isotonic regressors; keep normalized."""
     isoH, isoD, isoA = cal_triplet.get("home"), cal_triplet.get("draw"), cal_triplet.get("away")
     ph = float(isoH.transform([pH])[0]) if isoH is not None else pH
     pd_ = float(isoD.transform([pD])[0]) if isoD is not None else pD
@@ -114,7 +112,6 @@ def apply_isotonic_triplet(cal_triplet: Dict[str, Any], pH: float, pD: float, pA
     return (ph/s, pd_/s, pa/s)
 
 def kelly(p: float, dec: float, cap: float = 0.10) -> float:
-    """Classical Kelly (fraction is capped; negative -> 0)."""
     try:
         b = float(dec) - 1.0
         if b <= 0 or not np.isfinite(p): return 0.0
@@ -126,7 +123,6 @@ def kelly(p: float, dec: float, cap: float = 0.10) -> float:
         return 0.0
 
 def canonical_fixture_id(row: pd.Series) -> str:
-    """Create a stable fixture_id if upstream didn't supply one."""
     date = str(row.get("date", "NA")).replace("-", "")
     h = str(row.get("home_team", "NA")).strip().lower().replace(" ", "_")
     a = str(row.get("away_team", "NA")).strip().lower().replace(" ", "_")
@@ -139,11 +135,9 @@ def ensure_league(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def standardize_odds_columns(od: pd.DataFrame) -> pd.DataFrame:
-    """Map any known alt names into (oddsH, oddsD, oddsA, odds_over, total_line)."""
     if od.empty:
         return pd.DataFrame(columns=["fixture_id","oddsH","oddsD","oddsA","odds_over","total_line","num_books","bookmaker"])
     df = od.copy()
-    # Common alternates -> canonical
     rename = {
         "home_odds": "oddsH", "draw_odds": "oddsD", "away_odds": "oddsA",
         "home_odds_dec": "oddsH", "draw_odds_dec": "oddsD", "away_odds_dec": "oddsA",
@@ -152,37 +146,34 @@ def standardize_odds_columns(od: pd.DataFrame) -> pd.DataFrame:
     for k, v in rename.items():
         if k in df.columns and v not in df.columns:
             df[v] = df[k]
-    # minimal columns
     for c in ["oddsH","oddsD","oddsA","odds_over","total_line"]:
         if c not in df.columns:
             df[c] = np.nan
     if "bookmaker" not in df.columns:
         df["bookmaker"] = "unknown"
     if "num_books" not in df.columns:
-        # compute from bookmaker if present
         try:
             df["num_books"] = df.groupby("fixture_id")["bookmaker"].transform("nunique")
         except Exception:
             df["num_books"] = 1
     return df[["fixture_id","oddsH","oddsD","oddsA","odds_over","total_line","num_books","bookmaker"]].drop_duplicates("fixture_id")
 
-# ---------- Main ----------
-
 def main():
-    # 1) UPCOMING base
+    # 1) Upcoming
     if not os.path.exists(UP):
-        pd.DataFrame(columns=["fixture_id","date","league","home_team","away_team","pH","pD","pA",
-                              "oddsH","oddsD","oddsA","kelly_H","kelly_D","kelly_A","top_kelly"]).to_csv(OUT, index=False)
+        header = ["fixture_id","date","league","home_team","away_team","pH","pD","pA","oddsH","oddsD","oddsA","kelly_H","kelly_D","kelly_A","top_kelly"]
+        pd.DataFrame(columns=header).to_csv(OUT_DATA, index=False)
+        pd.DataFrame(columns=header).to_csv(OUT_RUN, index=False)
         print("[WARN] UPCOMING_7D_enriched.csv missing; wrote header-only predictions.")
         return
     up = pd.read_csv(UP)
     if up.empty:
-        pd.DataFrame(columns=["fixture_id","date","league","home_team","away_team","pH","pD","pA",
-                              "oddsH","oddsD","oddsA","kelly_H","kelly_D","kelly_A","top_kelly"]).to_csv(OUT, index=False)
+        header = ["fixture_id","date","league","home_team","away_team","pH","pD","pA","oddsH","oddsD","oddsA","kelly_H","kelly_D","kelly_A","top_kelly"]
+        pd.DataFrame(columns=header).to_csv(OUT_DATA, index=False)
+        pd.DataFrame(columns=header).to_csv(OUT_RUN, index=False)
         print("[WARN] UPCOMING_7D_enriched.csv empty; wrote header-only predictions.")
         return
 
-    # ensure presence of key fields
     up = ensure_league(up)
     if "fixture_id" not in up.columns:
         up["fixture_id"] = up.apply(canonical_fixture_id, axis=1)
@@ -194,26 +185,22 @@ def main():
             fproba = pd.read_csv(FP)
         except Exception:
             pass
-    # join on (date, home, away) which is how you generate feature_proba_upcoming.csv
     df = up.merge(fproba, on=["date","home_team","away_team"], how="left", suffixes=("",""))
 
-    # 3) Optional odds (canonicalize)
+    # 3) Optional odds
     if os.path.exists(ODDS):
         od = standardize_odds_columns(pd.read_csv(ODDS))
     else:
         od = pd.DataFrame(columns=["fixture_id","oddsH","oddsD","oddsA","odds_over","total_line","num_books","bookmaker"])
     df = df.merge(od, on="fixture_id", how="left")
 
-    # 4) Market implied probabilities (vig-stripped) if odds present
+    # 4) Market implied
     m_probs = np.full((len(df), 3), np.nan, dtype=float)
     if {"oddsH","oddsD","oddsA"}.issubset(df.columns):
-        mH = df["oddsH"].map(implied)
-        mD = df["oddsD"].map(implied)
-        mA = df["oddsA"].map(implied)
-        sv = np.array([strip_vig(h, d, a) for h, d, a in zip(mH, mD, mA)], dtype=float)
-        m_probs[:] = sv
+        mH = df["oddsH"].map(implied); mD = df["oddsD"].map(implied); mA = df["oddsA"].map(implied)
+        m_probs[:] = np.array([strip_vig(h,d,a) for h,d,a in zip(mH,mD,mA)], dtype=float)
 
-    # 5) Elo fallback from HIST
+    # 5) Elo
     elo_R = {}
     if os.path.exists(HIST):
         try:
@@ -226,12 +213,13 @@ def main():
     elo_arr = np.array([elo_triplet(elo_R.get(ht,1500.0), elo_R.get(at,1500.0))
                         for ht, at in zip(df["home_team"], df["away_team"])], dtype=float)
 
-    # 6) Model combo: feature probs if available, else Elo fallback
-    f_ok = df[["fH","fD","fA"]].notna().all(axis=1).values if set(["fH","fD","fA"]).issubset(df.columns) else np.zeros(len(df), dtype=bool)
+    # 6) Model combo
+    have_f = set(["fH","fD","fA"]).issubset(df.columns)
+    f_ok = df[["fH","fD","fA"]].notna().all(axis=1).values if have_f else np.zeros(len(df), dtype=bool)
     feature_arr = df[["fH","fD","fA"]].fillna(0.0).values if f_ok.any() else np.zeros_like(elo_arr)
-    model_combo = np.where(f_ok[:, None], feature_arr, elo_arr)  # shape (N,3)
+    model_combo = np.where(f_ok[:, None], feature_arr, elo_arr)
 
-    # 7) Load blend weights & calibrators
+    # 7) Weights + calibrators
     blend = load_json(BL, {"w_market_global": 0.85, "w_market_leagues": {}})
     w_global = float(blend.get("w_market_global", 0.85))
     w_league = blend.get("w_market_leagues", {}) or {}
@@ -239,23 +227,17 @@ def main():
     cal_global = cals.get("global", {"home": None, "draw": None, "away": None})
     cal_leagues = cals.get("per_league", {}) or {}
 
-    # 8) Blend with market per row using league-specific w if available
     leagues = df["league"].astype(str).values
     blended = np.zeros_like(model_combo)
     for i in range(len(df)):
         w = float(w_league.get(leagues[i], w_global))
-        m_vec = m_probs[i]
-        e_vec = model_combo[i]
-        # if market missing, use model only
-        if np.isnan(m_vec).any():
-            vec = e_vec
-        else:
-            vec = w * m_vec + (1.0 - w) * e_vec
+        m_vec = m_probs[i]; e_vec = model_combo[i]
+        vec = e_vec if np.isnan(m_vec).any() else (w*m_vec + (1.0-w)*e_vec)
         s = vec.sum()
         blended[i] = vec / s if s > 0 else e_vec
 
-    # 9) Apply per-league isotonic calibration (fallback to global triplet if league not present)
-    pH, pD, pA = blended[:,0], blended[:,1], blended[:,2]
+    # 9) Calibrate
+    pH,pD,pA = blended[:,0], blended[:,1], blended[:,2]
     pH_cal = np.empty_like(pH); pD_cal = np.empty_like(pD); pA_cal = np.empty_like(pA)
     for i in range(len(df)):
         lg = leagues[i]
@@ -263,12 +245,11 @@ def main():
         ph_i, pd_i, pa_i = apply_isotonic_triplet(cal_trip, pH[i], pD[i], pA[i])
         pH_cal[i], pD_cal[i], pA_cal[i] = ph_i, pd_i, pa_i
 
-    # 10) Kelly columns (bounded; use for display only—final staking goes through caps step)
+    # 10) Kelly (display only)
     kH = [kelly(h, d) for h, d in zip(pH_cal, df.get("oddsH", pd.Series(np.nan, index=df.index)))]
     kD = [kelly(d, d_od) for d, d_od in zip(pD_cal, df.get("oddsD", pd.Series(np.nan, index=df.index)))]
     kA = [kelly(a, d) for a, d in zip(pA_cal, df.get("oddsA", pd.Series(np.nan, index=df.index)))]
 
-    # 11) Output
     out = pd.DataFrame({
         "fixture_id": df.get("fixture_id"),
         "date": df.get("date"),
@@ -280,28 +261,20 @@ def main():
         "kelly_H": kH, "kelly_D": kD, "kelly_A": kA
     })
 
-    # convenience: legacy names (home_odds_dec, etc.) for any old consumers
     for legacy, canon in [("home_odds_dec","oddsH"),("draw_odds_dec","oddsD"),("away_odds_dec","oddsA")]:
-        if legacy not in out.columns:
-            out[legacy] = out[canon]
+        if legacy not in out.columns: out[legacy] = out[canon]
 
-    # quality guard: normalize probs row-wise (floating error guard)
     s = out[["pH","pD","pA"]].sum(axis=1).replace(0, np.nan)
-    out["pH"] = out["pH"] / s
-    out["pD"] = out["pD"] / s
-    out["pA"] = out["pA"] / s
+    out["pH"] = out["pH"]/s; out["pD"] = out["pD"]/s; out["pA"] = out["pA"]/s
 
-    # top kelly (display)
     out["top_kelly"] = np.nanmax(
         np.vstack([
             out["kelly_H"].fillna(0.0).values,
             out["kelly_D"].fillna(0.0).values,
             out["kelly_A"].fillna(0.0).values
-        ]).T,
-        axis=1
+        ]).T, axis=1
     )
 
-    # ordering
     if "date" in out.columns:
         try:
             out["date"] = pd.to_datetime(out["date"], errors="coerce")
@@ -309,8 +282,10 @@ def main():
         except Exception:
             pass
 
-    out.to_csv(OUT, index=False)
-    print(f"[OK] wrote {OUT} rows={len(out)}")
+    # WRITE to data/ and runs/
+    out.to_csv(OUT_DATA, index=False)
+    out.to_csv(OUT_RUN, index=False)
+    print(f"[OK] wrote {OUT_DATA} and {OUT_RUN} rows={len(out)}")
 
 if __name__ == "__main__":
     main()
