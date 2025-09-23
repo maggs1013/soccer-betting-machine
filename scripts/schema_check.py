@@ -13,13 +13,11 @@ RUN_DATE = datetime.utcnow().strftime("%Y-%m-%d")
 RUN_DIR = os.path.join("runs", RUN_DATE)
 DATA_DIR = "data"
 
-# Accept either style for calibration summary
 CAL_OK_SETS = [
     {"metric","value"},
     {"ece_weighted"}
 ]
 
-# Only require the *critical* subset; extras are OK
 CHECKS = {
     "PREDICTIONS_7D.csv": ["fixture_id","pH","pD","pA","oddsH","oddsD","oddsA"],
     "PREDICTIONS_BTTS_7D.csv": ["fixture_id","p_btts_yes"],
@@ -35,7 +33,7 @@ CHECKS = {
     "FEATURE_DRIFT.csv": None,
     "LINE_MOVE_LOG.csv": None,
     "EXECUTION_FEASIBILITY.csv": ["fixture_id","league","feasible"],
-    "PER_LEAGUE_BLEND_WEIGHTS.csv": ["league","w_market"],
+    "PER_LEAGUE_BLEND_WEIGHTS.csv": ["league","w_market"]
 }
 
 def first_path(name: str) -> str:
@@ -53,19 +51,15 @@ def check_csv(path: str, req_cols):
     missing = [c for c in req_cols if c not in have]
     if missing:
         raise ValueError(f"{path} missing required columns {missing}")
-    # Extra columns are allowed
 
 def main():
     errors = []
-
-    # Standard checks
     for fname, cols in CHECKS.items():
         try:
             check_csv(first_path(fname), cols)
         except Exception as e:
             errors.append(str(e))
 
-    # Special check for CALIBRATION_SUMMARY.csv
     cal_path = first_path("CALIBRATION_SUMMARY.csv")
     if not os.path.exists(cal_path):
         errors.append(f"{cal_path} not found")
