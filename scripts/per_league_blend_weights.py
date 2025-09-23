@@ -4,12 +4,6 @@
 # Writes:
 #   data/PER_LEAGUE_BLEND_WEIGHTS.csv
 #   runs/YYYY-MM-DD/PER_LEAGUE_BLEND_WEIGHTS.csv
-#
-# Notes:
-# - Supports both schemas:
-#     {"w_market_global": 0.85, "w_market_leagues": {"EPL":0.82,...}}
-#   and legacy:
-#     {"w_market": 0.85}
 
 import os, json, pandas as pd
 from datetime import datetime
@@ -17,14 +11,12 @@ from datetime import datetime
 DATA = "data"
 BLND = os.path.join(DATA, "model_blend.json")
 HIST = os.path.join(DATA, "HIST_matches.csv")
-
 OUT_DATA = os.path.join(DATA, "PER_LEAGUE_BLEND_WEIGHTS.csv")
 RUN_DIR = os.path.join("runs", datetime.utcnow().strftime("%Y-%m-%d"))
 os.makedirs(RUN_DIR, exist_ok=True)
 OUT_RUN = os.path.join(RUN_DIR, "PER_LEAGUE_BLEND_WEIGHTS.csv")
 
 def main():
-    # Defaults
     w_global = 0.85
     w_leagues = {}
 
