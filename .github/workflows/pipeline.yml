@@ -70,7 +70,7 @@ jobs:
         run: python scripts/fetch_the_odds_api.py
 
       # ---------- xG / Strength sources ----------
-      # CHANGED: use cached wrapper for soccerdata so FBref/538 failures fall back to last-good data
+      # Cached wrapper so FBref/538 failures fall back to last-good data
       - name: Fetch via soccerdata (FBref + 538) with cache
         run: python scripts/wrap_soccerdata_with_cache.py
 
@@ -125,12 +125,16 @@ jobs:
       - name: League seasonality enrichment
         run: python scripts/add_league_seasonality.py
 
-      # NEW: tag competitions for downstream selection
+      # Tag competitions for downstream selection
       - name: Competition flags (UEFA tagging)
         run: python scripts/add_competition_flags.py
 
       - name: Build HIST & UPCOMING
         run: python scripts/build_hist_and_upcoming.py
+
+      # NEW: Tournament priors/experience for UEFA (domestic LSI/TSI + UEFA exp)
+      - name: Tournament extras (priors for UEFA)
+        run: python scripts/engineer_tournament_extras.py
 
       # ---------- Operational reports ----------
       - name: Sanity check inputs
@@ -172,7 +176,7 @@ jobs:
       - name: Blend and calibrate (02 step)
         run: python scripts/02_blend_and_calibrate.py
 
-      # NEW: UEFA-only blend & calibrators
+      # UEFA-only blend & calibrators
       - name: Tournament blend & calibrate (UEFA only)
         run: python scripts/train_tournament_blend_and_calibrate.py
 
@@ -235,8 +239,9 @@ jobs:
       - name: Odds move deltas (features & overlay)
         run: python scripts/add_odds_move_deltas.py
 
-      - name: Stacking log (BTTS meta-weights placeholder)
-        run: python scripts/stacking_log.py
+      # NEW: Council tournament scan (human triage)
+      - name: Tournament scan (Council view)
+        run: python scripts/council_tournament_scan.py
 
       # ---------- Triage helpers before auto-briefing ----------
       - name: Make run index (one-screen triage)
