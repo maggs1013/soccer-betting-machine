@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # Train a multinomial logistic feature model using domestic-only results for windows & samples,
-# while keeping robustness (missing league → GLOBAL) and time-decay weighting.
-# Safe momentum computations (no KeyErrors) via Series.get(..., NaN-series) fallbacks.
+# with time-decay weighting and robust feature engineering (no KeyErrors from missing cols).
 
 import os, json, pickle
 import numpy as np
@@ -18,7 +17,7 @@ FORM = os.path.join(DATA, "team_form_features.csv")
 OUTM = os.path.join(DATA, "feature_model.pkl")
 OUTF = os.path.join(DATA, "feature_model_features.json")
 
-HALF_LIFE_DAYS = 180.0
+HALF_LIFE_DAYS = 180.0  # recency half-life in days
 
 UEFA_LEAGUE_TOKENS = [
     "champions league", "uefa champions", "ucl",
@@ -28,15 +27,15 @@ UEFA_LEAGUE_TOKENS = [
 ]
 
 def is_uefa(s):
-    if not isinstance(s,str): return False
+    if not isinstance(s, str): return False
     s2 = s.lower()
     return any(tok in s2 for tok in UEFA_LEAGUE_TOKENS)
 
-def safe_read(p, cols=None):
-    if not os.path.exists(p):
+def safe_read(path, cols=None):
+    if not os.path.exists(path):
         return pd.DataFrame(columns=cols or [])
     try:
-        df = pd.read_csv(p)
+        df = pd.read_csv(path)
     except Exception:
         return pd.DataFrame(columns=cols or [])
     if cols:
@@ -50,47 +49,51 @@ def write_empty_model(feat_names, msg):
     print(f"[WARN] {msg} → wrote empty feature model.")
 
 def build_long(H):
+    """Return long per-team table with date,gf,ga,pts and UEFA flag."""
     H = H.copy()
     H["date"] = pd.to_datetime(H["date"], errors="coerce")
     H = H.dropna(subset=["date"]).sort_values("date")
     if "league" not in H.columns: H["league"] = "GLOBAL"
     H["is_uefa"] = H["league"].astype(str).apply(is_uefa).astype(int)
+
     h = H[["date","home_team","home_goals","away_goals","league","is_uefa"]].rename(
         columns={"home_team":"team","home_goals":"gf","away_goals":"ga"})
     a = H[["date","away_team","home_goals","away_goals","league","is_uefa"]].rename(
         columns={"away_team":"team","away_goals":"gf","home_goals":"ga"})
     long = pd.concat([h,a], ignore_index=True).sort_values("date")
+
     long["pts"] = 0
     long.loc[long["gf"] > long["ga"], "pts"] = 3
     long.loc[long["gf"] == long["ga"], "pts"] = 1
     return long
 
 def windows_ppg(long_dom, team, n):
-    g = long_dom[long_dom["team"]==team]
+    g = long_dom[long_dom["team"] == team]
     if g.empty: return np.nan
     return g["pts"].rolling(n, min_periods=1).mean().iloc[-1]
 
 def get_season_ppg(long_dom, team, year):
-    """renamed to avoid colliding with variable name later"""
-    g = long_dom[(long_dom["team"]==team) & (long_dom["date"].dt.year==year)]
+    """Season-to-date PPG (domestic only)."""
+    g = long_dom[(long_dom["team"] == team) & (long_dom["date"].dt.year == year)]
     if g.empty: return np.nan
     return g["pts"].mean()
 
 def main():
+    # ---------- Load HIST ----------
     hist = safe_read(HIST, ["date","home_team","away_team","home_goals","away_goals","league"])
     if hist.empty:
         write_empty_model([], "HIST empty"); return
 
     long_all = build_long(hist)
-    long_dom = long_all[long_all["is_uefa"]==0]  # domestic only
+    long_dom = long_all[long_all["is_uefa"] == 0]  # domestic only
 
-    # Build team list from available sources
+    # ---------- Build team vector base from sources ----------
     hyb = safe_read(HYB, ["team","xg_hybrid","xga_hybrid","xgd90_hybrid"])
     sbf = safe_read(SBF, ["team","xa_sb","psxg_minus_goals_sb","setpiece_xg_sb","openplay_xg_sb"])
     spi = safe_read(SPI)
     spi_cols = {c.lower(): c for c in spi.columns}
     if "team" not in spi.columns:
-        if "squad" in spi.columns: spi = spi.rename(columns={"squad":"team"})
+        if "squad" in spi.columns:      spi = spi.rename(columns={"squad":"team"})
         elif "team_name" in spi.columns: spi = spi.rename(columns={"team_name":"team"})
     off_col = spi_cols.get("off") or spi_cols.get("offense")
     def_col = spi_cols.get("def") or spi_cols.get("defense")
@@ -99,41 +102,38 @@ def main():
         spi_small = spi.groupby("team", as_index=False)[[off_col,def_col]].mean()
         spi_small = spi_small.rename(columns={off_col:"spi_off", def_col:"spi_def"})
 
-    teamvec = pd.DataFrame({"team": pd.unique(pd.concat([hyb["team"], sbf["team"], spi_small["team"]], ignore_index=True).dropna())})
+    teamvec = pd.DataFrame({
+        "team": pd.unique(pd.concat([hyb["team"], sbf["team"], spi_small["team"]], ignore_index=True).dropna())
+    })
     if teamvec.empty:
         write_empty_model([], "No team vectors available")
         return
 
-    # Merge sources
+    # Merge sources into teamvec
     teamvec = teamvec.merge(hyb, on="team", how="left")
     if not sbf.empty:
         sbf2 = sbf.groupby("team", as_index=False).agg({
             "xa_sb":"mean","psxg_minus_goals_sb":"mean","setpiece_xg_sb":"mean","openplay_xg_sb":"mean"
         })
         tot = (sbf2["setpiece_xg_sb"] + sbf2["openplay_xg_sb"]).replace(0, np.nan)
-        sbf2["setpiece_share"] = (sbf2["setpiece_xg_sb"]/tot).fillna(0.0)
+        sbf2["setpiece_share"] = (sbf2["setpiece_xg_sb"] / tot).fillna(0.0)
         teamvec = teamvec.merge(sbf2[["team","xa_sb","psxg_minus_goals_sb","setpiece_share"]], on="team", how="left")
     if not spi_small.empty:
         teamvec = teamvec.merge(spi_small, on="team", how="left")
 
-    # Compute domestic-only windows for each team (anchor to most recent date in hist)
+    # ---------- Domestic windows per team ----------
     last_date = long_dom["date"].max() if not long_dom.empty else pd.Timestamp.utcnow()
     win_rows = []
     for team in teamvec["team"].dropna().unique():
+        g_team = long_dom[long_dom["team"] == team]
         row = {"team": team}
         row["last3_ppg"]  = windows_ppg(long_dom, team, 3)
         row["last5_ppg"]  = windows_ppg(long_dom, team, 5)
         row["last7_ppg"]  = windows_ppg(long_dom, team, 7)
         row["last10_ppg"] = windows_ppg(long_dom, team, 10)
         row["season_ppg"] = get_season_ppg(long_dom, team, last_date.year)
-        # volatility (domestic)
-        g = long_dom[long_dom["team"]==team]
-        if g.empty:
-            row["goal_volatility_5"] = np.nan
-            row["goal_volatility_10"] = np.nan
-        else:
-            row["goal_volatility_5"]  = g["gf"].rolling(5,  min_periods=2).var().iloc[-1]
-            row["goal_volatility_10"] = g["gf"].rolling(10, min_periods=2).var().iloc[-1]
+        row["goal_volatility_5"]  = g_team["gf"].rolling(5,  min_periods=2).var().iloc[-1] if not g_team.empty else np.nan
+        row["goal_volatility_10"] = g_team["gf"].rolling(10, min_periods=2).var().iloc[-1] if not g_team.empty else np.nan
         win_rows.append(row)
     tv_win = pd.DataFrame(win_rows)
 
@@ -155,7 +155,7 @@ def main():
     else:
         teamvec["last5_xgpg"] = np.nan
 
-    # ---- SAFE momentum computations (no KeyError) ----
+    # ---- Safe momentum computations (no KeyErrors) ----
     nan_series = pd.Series(np.nan, index=teamvec.index)
     last3_ppg_series   = teamvec.get("last3_ppg",   nan_series)
     last10_ppg_series  = teamvec.get("last10_ppg",  nan_series)
@@ -165,7 +165,7 @@ def main():
     teamvec["ppg_momentum_3_10"]     = last3_ppg_series - last10_ppg_series
     teamvec["ppg_momentum_5_season"] = last5_ppg_series - season_ppg_series
 
-    # Feature list
+    # ---------- Feature set ----------
     numeric_cols = [
         "xg_hybrid","xga_hybrid","xgd90_hybrid",
         "xa_sb","psxg_minus_goals_sb","setpiece_share",
@@ -179,21 +179,22 @@ def main():
         if c not in teamvec.columns:
             teamvec[c] = np.nan
 
-    # Build domestic-only training samples
+    # ---------- Build DOMESTIC training samples ----------
     dom_matches = hist.copy()
-    if "league" not in dom_matches.columns: dom_matches["league"]="GLOBAL"
+    if "league" not in dom_matches.columns: dom_matches["league"] = "GLOBAL"
     dom_matches = dom_matches[~dom_matches["league"].astype(str).apply(is_uefa)]
     dom_matches["date"] = pd.to_datetime(dom_matches["date"], errors="coerce")
     dom_matches = dom_matches.dropna(subset=["date"]).sort_values("date")
 
-    y = np.where(dom_matches["home_goals"]>dom_matches["away_goals"],0,
-         np.where(dom_matches["home_goals"]==dom_matches["away_goals"],1,2))
+    y = np.where(dom_matches["home_goals"] > dom_matches["away_goals"], 0,
+        np.where(dom_matches["home_goals"] == dom_matches["away_goals"], 1, 2))
 
     samples, labels, dates = [], [], []
     for r, lab in zip(dom_matches.itertuples(index=False), y):
-        hv = teamvec[teamvec["team"]==r.home_team].head(1)
-        av = teamvec[teamvec["team"]==r.away_team].head(1)
-        if hv.empty or av.empty: continue
+        hv = teamvec[teamvec["team"] == r.home_team].head(1)
+        av = teamvec[teamvec["team"] == r.away_team].head(1)
+        if hv.empty or av.empty:
+            continue
         diffs = (hv[numeric_cols].values - av[numeric_cols].values)[0]
         samples.append(diffs); labels.append(lab); dates.append(r.date)
 
@@ -202,24 +203,24 @@ def main():
         return
 
     X = np.asarray(samples, dtype=float)
-    y2= np.asarray(labels, dtype=int)
+    y2 = np.asarray(labels, dtype=int)
     d_arr = pd.to_datetime(pd.Series(dates), errors="coerce")
     max_date = hist["date"].max()
 
-    # drop fully-NaN rows
+    # Drop fully-NaN rows
     mask = ~np.isnan(X).all(axis=1)
     X = X[mask]; y2 = y2[mask]; d_arr = d_arr[mask]
-    if X.size==0 or np.unique(y2).size<3:
+    if X.size == 0 or np.unique(y2).size < 3:
         write_empty_model([f"diff_{c}" for c in numeric_cols], "Not enough clean domestic samples/classes")
         return
 
-    # Impute
+    # Impute missing values
     col_medians = np.nanmedian(X, axis=0)
     col_medians = np.where(np.isfinite(col_medians), col_medians, 0.0)
     nr, nc = np.where(np.isnan(X))
     if nr.size: X[nr, nc] = col_medians[nc]
 
-    # Time-decay weights
+    # Time-decay sample weights
     days_back = (max_date - d_arr).dt.days.clip(lower=0).astype(float)
     weights = np.power(0.5, days_back / HALF_LIFE_DAYS)
 
