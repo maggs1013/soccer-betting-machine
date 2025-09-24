@@ -41,18 +41,16 @@ def has_token(s, toks):
     return any(tok in s2 for tok in toks)
 
 def league_tier(league: str) -> str:
-    # coarse tier for the existing output
     if has_token(league, UCL_TOKENS + UEL_TOKENS + UECL_TOKENS): return "UEFA"
     if has_token(league, BIG5_TOKENS): return "Big5"
     return "Other"
 
 def comp_bucket(league: str) -> str:
-    # fine-grained competition grouping for the NEW output
     if has_token(league, UCL_TOKENS):  return "UCL"
     if has_token(league, UEL_TOKENS):  return "UEL"
     if has_token(league, UECL_TOKENS): return "UECL"
-    if has_token(league, BIG5_TOKENS): return "Domestic"  # Big5 domestic comps
-    return "Other"  # anything else (domestic outside Big5 or miscellany)
+    if has_token(league, BIG5_TOKENS): return "Domestic"
+    return "Other"
 
 def implied(dec):
     try: d=float(dec); return 1.0/d if d>0 else np.nan
@@ -127,7 +125,7 @@ def main():
         h,a=r.home_team, r.away_team
         R.setdefault(h,1500.0); R.setdefault(a,1500.0)
         e_rows.append(elo_triplet(R[h],R[a]))
-        Eh=1.0/(1.0+10.0**(-((R[h]-R[a]+60.0)/400.0)))
+        Eh = 1.0/(1.0+10.0**(-((R[h]-R[a]+60.0)/400.0)))
         if pd.isna(r.home_goals) or pd.isna(r.away_goals): continue
         score = 1.0 if r.home_goals>r.away_goals else (0.5 if r.home_goals==r.away_goals else 0.0)
         K=20.0
@@ -156,7 +154,7 @@ def main():
 
     # 1) Summary by league + global
     rows=[]
-    for name, P in [("market",m_probs),("elo",e_probs),("blend",blendP)]:
+    for name, P in [("market", m_probs), ("elo", e_probs), ("blend", blendP)]:
         for lg, grp in df.groupby("league").groups.items():
             sl = np.array(list(grp), dtype=int)
             h,ll,br = eval_block(P[sl], y[sl])
@@ -191,18 +189,19 @@ def main():
     # 3) By odds bucket (favourite odds)
     rows=[]
     if have_odds:
-        fav = np.nanmin(np.vstack([df["home_odds_dec"],df["draw_odds_dec"],df["away_odds_dec"]]).T, axis=1)
+        fav = np.nanmin(np.vstack([df["home_odds_dec"], df["draw_odds_dec"], df["away_odds_dec"]]).T, axis=1)
         cats = pd.cut(fav, bins=[b[0] for b in ODDS_BUCKETS]+[ODDS_BUCKETS[-1][1]],
                       labels=ODDS_BUCKET_LABELS, include_lowest=True)
-        cats = cats.astype(str).values
+        # SAFE conversion: always go through a Series before to_numpy()
+        cats = pd.Series(cats).astype(str).to_numpy()
         for lab in ODDS_BUCKET_LABELS:
-            mask = (cats==lab)
+            mask = (cats == lab)
             if mask.sum()==0:
                 for name in ("market","elo","blend"):
                     rows.append({"odds_bucket": lab, "model": name, "n": 0,
                                  "hit_rate": np.nan, "logloss": np.nan, "brier": np.nan})
                 continue
-            for name,P in [("market",m_probs[mask]),("elo",e_probs[mask]),("blend",blendP[mask])]:
+            for name, P in [("market",m_probs[mask]),("elo",e_probs[mask]),("blend",blendP[mask])]:
                 h,ll,br = eval_block(P, y[mask])
                 rows.append({"odds_bucket": lab, "model": name,
                              "n": int(np.isfinite(P).all(axis=1).sum()),
@@ -225,10 +224,10 @@ def main():
     pd.DataFrame(rows).to_csv(os.path.join(RUN_DIR,"MODEL_ACCURACY_BY_BETTYPE.csv"), index=False)
 
     # 5) By league tier (Big5 / UEFA / Other)
-    tiers = df["league"].apply(league_tier).values
+    tiers = df["league"].apply(league_tier).to_numpy()
     rows=[]
     for tier in ("Big5","UEFA","Other"):
-        mask = (tiers==tier)
+        mask = (tiers == tier)
         for name,P in [("market",m_probs[mask]),("elo",e_probs[mask]),("blend",blendP[mask])]:
             h,ll,br = eval_block(P, y[mask])
             rows.append({"league_tier": tier, "model": name,
@@ -239,10 +238,10 @@ def main():
     pd.DataFrame(rows).to_csv(os.path.join(RUN_DIR,"MODEL_ACCURACY_BY_LEAGUE_TIER.csv"), index=False)
 
     # 6) By competition (UCL / UEL / UECL / Domestic / Other)
-    comps = df["league"].apply(comp_bucket).values
+    comps = df["league"].apply(comp_bucket).to_numpy()
     rows=[]
     for comp in ("UCL","UEL","UECL","Domestic","Other"):
-        mask = (comps==comp)
+        mask = (comps == comp)
         for name,P in [("market",m_probs[mask]),("elo",e_probs[mask]),("blend",blendP[mask])]:
             h,ll,br = eval_block(P, y[mask])
             rows.append({"competition": comp, "model": name,
