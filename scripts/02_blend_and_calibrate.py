@@ -46,10 +46,23 @@ def fit_iso(p, ybin):
         iso=IsotonicRegression(out_of_bounds="clip"); iso.fit(p, ybin); return iso
     except Exception: return None
 
-def weighted_logloss(B, y, w):
+def weighted_logloss(B: np.ndarray, y: np.ndarray, w: np.ndarray) -> float:
+    """
+    B: (n,3) probabilities (already normalized)
+    y: (n,) integer labels {0,1,2}
+    w: (n,) nonnegative weights (time-decay)
+    Return weighted average of -log p_y.
+    Shape-safe: flattens values to 1D before np.average.
+    """
     eps = 1e-12
+    # pick the predicted prob for the true class
     pick = np.take_along_axis(B, y.reshape(-1,1), axis=1).clip(eps)
-    return float(np.average(-np.log(pick), weights=w))
+    vals = (-np.log(pick)).reshape(-1)           # (n,)
+    ww   = np.asarray(w, dtype=float).reshape(-1)
+    if ww.size != vals.size:
+        # lengths must match – safest fallback: uniform weights
+        ww = np.ones_like(vals, dtype=float)
+    return float(np.average(vals, weights=ww))
 
 def learn_weight(pM, pE, y, w, default_w=0.85):
     grid = np.linspace(W_MIN, W_MAX, 9)
