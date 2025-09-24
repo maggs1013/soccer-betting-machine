@@ -70,7 +70,8 @@ def windows_ppg(long_dom, team, n):
     if g.empty: return np.nan
     return g["pts"].rolling(n, min_periods=1).mean().iloc[-1]
 
-def season_ppg(long_dom, team, year):
+def get_season_ppg(long_dom, team, year):
+    """renamed to avoid colliding with variable name later"""
     g = long_dom[(long_dom["team"]==team) & (long_dom["date"].dt.year==year)]
     if g.empty: return np.nan
     return g["pts"].mean()
@@ -124,7 +125,7 @@ def main():
         row["last5_ppg"]  = windows_ppg(long_dom, team, 5)
         row["last7_ppg"]  = windows_ppg(long_dom, team, 7)
         row["last10_ppg"] = windows_ppg(long_dom, team, 10)
-        row["season_ppg"] = season_ppg(long_dom, team, last_date.year)
+        row["season_ppg"] = get_season_ppg(long_dom, team, last_date.year)
         # volatility (domestic)
         g = long_dom[long_dom["team"]==team]
         if g.empty:
@@ -156,13 +157,13 @@ def main():
 
     # ---- SAFE momentum computations (no KeyError) ----
     nan_series = pd.Series(np.nan, index=teamvec.index)
-    last3_ppg   = teamvec.get("last3_ppg",   nan_series)
-    last10_ppg  = teamvec.get("last10_ppg",  nan_series)
-    last5_ppg   = teamvec.get("last5_ppg",   nan_series)
-    season_ppg  = teamvec.get("season_ppg",  nan_series)
+    last3_ppg_series   = teamvec.get("last3_ppg",   nan_series)
+    last10_ppg_series  = teamvec.get("last10_ppg",  nan_series)
+    last5_ppg_series   = teamvec.get("last5_ppg",   nan_series)
+    season_ppg_series  = teamvec.get("season_ppg",  nan_series)
 
-    teamvec["ppg_momentum_3_10"]     = last3_ppg - last10_ppg
-    teamvec["ppg_momentum_5_season"] = last5_ppg - season_ppg
+    teamvec["ppg_momentum_3_10"]     = last3_ppg_series - last10_ppg_series
+    teamvec["ppg_momentum_5_season"] = last5_ppg_series - season_ppg_series
 
     # Feature list
     numeric_cols = [
