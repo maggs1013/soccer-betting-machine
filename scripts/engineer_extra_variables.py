@@ -16,17 +16,19 @@ Fatigue / Congestion (all competitions):
   - engine_home/away_days_since_last
   - engine_home/away_midweek_last7 (Tue/Wed/Thu in last 7d → 1 else 0)
 
-Other context already handled in your other scripts:
-  - engine_league_gpg_month via add_league_seasonality.py
-  - finishing efficiency / travel fatigue (kept from earlier version)
+Tournament-aware extras:
+  - engine_is_neutral         (heuristic from league text)
+  - engine_comp_stage ∈ {Group, Knockout, Final, Unknown}
 
-UEFA detection: see UEFA_LEAGUE_TOKENS below.
+Other context handled elsewhere:
+  - engine_league_gpg_month via add_league_seasonality.py
+  - travel fatigue / finishing efficiency in other modules as you’ve implemented
 """
 
 import os
 import numpy as np
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 DATA = "data"
 UP   = os.path.join(DATA, "UPCOMING_7D_enriched.csv")
@@ -36,13 +38,30 @@ UEFA_LEAGUE_TOKENS = [
     "champions league", "uefa champions", "ucl",
     "europa league", "uel",
     "conference league", "uefa europa conference",
-    "super cup"  # optional
+    "super cup"
 ]
 
 def is_uefa(league_val: str) -> bool:
     if not isinstance(league_val, str): return False
     s = league_val.lower()
     return any(tok in s for tok in UEFA_LEAGUE_TOKENS)
+
+def stage_from_league(league: str) -> str:
+    """Very light heuristic stage detection from league string."""
+    if not isinstance(league,str): return "Unknown"
+    s = league.lower()
+    if "group" in s: return "Group"
+    if "round of 16" in s or "r16" in s: return "Knockout"
+    if "quarter" in s or "qf" in s: return "Knockout"
+    if "semi" in s or "sf" in s: return "Knockout"
+    if "final" in s: return "Final"
+    return "Unknown"
+
+def is_neutral_from_league(league: str) -> int:
+    """Heuristic neutral detection when venue fields aren’t available."""
+    if not isinstance(league,str): return 0
+    s = league.lower()
+    return int("final" in s or "super cup" in s or "neutral" in s)
 
 def safe_read(path, cols=None):
     if not os.path.exists(path):
@@ -62,6 +81,7 @@ def to_long_hist(H: pd.DataFrame) -> pd.DataFrame:
     H = H.dropna(subset=["date"]).sort_values("date")
     if "league" not in H.columns:
         H["league"] = "GLOBAL"
+    # long format for PPG / congestion
     h = H[["date","home_team","home_goals","away_goals","league"]].rename(
         columns={"home_team":"team","home_goals":"gf","away_goals":"ga"})
     a = H[["date","away_team","home_goals","away_goals","league"]].rename(
@@ -85,23 +105,26 @@ def season_ppg(long: pd.DataFrame, team: str, date_ref: pd.Timestamp, domestic_o
     g = long[long["team"]==team]
     if domestic_only:
         g = g[g["is_uefa"]==0]
-    if g.empty: return np.nan
-    season = date_ref.year
+    if g.empty or pd.isna(date_ref): return np.nan
+    season = pd.Timestamp(date_ref).year
     g_season = g[g["date"].dt.year==season]
     return g_season["pts"].mean() if not g_season.empty else np.nan
 
 def congestion_counts(long_all: pd.DataFrame, team: str, date_ref: pd.Timestamp, days: int) -> int:
-    start = date_ref - timedelta(days=days)
+    if pd.isna(date_ref): return 0
+    start = pd.Timestamp(date_ref) - timedelta(days=days)
     g = long_all[(long_all["team"]==team) & (long_all["date"] < date_ref) & (long_all["date"] >= start)]
     return int(len(g))
 
 def days_since_last(long_all: pd.DataFrame, team: str, date_ref: pd.Timestamp) -> float:
+    if pd.isna(date_ref): return np.nan
     g = long_all[(long_all["team"]==team) & (long_all["date"] < date_ref)]
     if g.empty: return np.nan
-    return float((date_ref - g["date"].iloc[-1]).days)
+    return float((pd.Timestamp(date_ref) - g["date"].iloc[-1]).days)
 
 def midweek_last7(long_all: pd.DataFrame, team: str, date_ref: pd.Timestamp) -> int:
-    start = date_ref - timedelta(days=7)
+    if pd.isna(date_ref): return 0
+    start = pd.Timestamp(date_ref) - timedelta(days=7)
     g = long_all[(long_all["team"]==team) & (long_all["date"] < date_ref) & (long_all["date"] >= start)]
     if g.empty: return 0
     # Tue(1)/Wed(2)/Thu(3)
@@ -117,7 +140,7 @@ def main():
 
     H = safe_read(HIST, ["date","home_team","away_team","home_goals","away_goals","league"])
     if H.empty:
-        # emit empty engineered columns
+        # Emit empty engineered columns (keep your original set)
         cols = [
             "engine_home_last3_ppg","engine_away_last3_ppg",
             "engine_home_last5_ppg","engine_away_last5_ppg",
@@ -131,7 +154,9 @@ def main():
             "engine_home_matches_10d","engine_away_matches_10d",
             "engine_home_matches_14d","engine_away_matches_14d",
             "engine_home_days_since_last","engine_away_days_since_last",
-            "engine_home_midweek_last7","engine_away_midweek_last7"
+            "engine_home_midweek_last7","engine_away_midweek_last7",
+            # new extras (neutral/stage) even if empty:
+            "engine_is_neutral","engine_comp_stage"
         ]
         for c in cols: up[c] = np.nan
         up.to_csv(UP, index=False)
@@ -147,7 +172,8 @@ def main():
         dt = getattr(r, "date")
         ht = getattr(r, "home_team")
         at = getattr(r, "away_team")
-        # windows: domestic-only, season anchored to fixture year
+
+        # windows (domestic-only)
         h3  = rolling_ppg(long_dom, ht, 3,  domestic_only=True)
         h5  = rolling_ppg(long_dom, ht, 5,  domestic_only=True)
         h7  = rolling_ppg(long_dom, ht, 7,  domestic_only=True)
@@ -181,6 +207,7 @@ def main():
         hmw7 = midweek_last7(long, ht, dt)
         amw7 = midweek_last7(long, at, dt)
 
+        # write home vars
         ecols.setdefault("engine_home_last3_ppg", []).append(h3)
         ecols.setdefault("engine_home_last5_ppg", []).append(h5)
         ecols.setdefault("engine_home_last7_ppg", []).append(h7)
@@ -188,7 +215,14 @@ def main():
         ecols.setdefault("engine_home_season_ppg", []).append(hs)
         ecols.setdefault("engine_home_ppg_momentum_3_10", []).append(h_m3_10)
         ecols.setdefault("engine_home_ppg_momentum_5_season", []).append(h_m5_s)
+        ecols.setdefault("engine_home_matches_3d", []).append(h3d)
+        ecols.setdefault("engine_home_matches_7d", []).append(h7d)
+        ecols.setdefault("engine_home_matches_10d", []).append(h10d)
+        ecols.setdefault("engine_home_matches_14d", []).append(h14d)
+        ecols.setdefault("engine_home_days_since_last", []).append(hds)
+        ecols.setdefault("engine_home_midweek_last7", []).append(hmw7)
 
+        # write away vars
         ecols.setdefault("engine_away_last3_ppg", []).append(a3)
         ecols.setdefault("engine_away_last5_ppg", []).append(a5)
         ecols.setdefault("engine_away_last7_ppg", []).append(a7)
@@ -196,20 +230,19 @@ def main():
         ecols.setdefault("engine_away_season_ppg", []).append(as_)
         ecols.setdefault("engine_away_ppg_momentum_3_10", []).append(a_m3_10)
         ecols.setdefault("engine_away_ppg_momentum_5_season", []).append(a_m5_s)
-
-        ecols.setdefault("engine_home_matches_3d", []).append(h3d)
-        ecols.setdefault("engine_home_matches_7d", []).append(h7d)
-        ecols.setdefault("engine_home_matches_10d", []).append(h10d)
-        ecols.setdefault("engine_home_matches_14d", []).append(h14d)
         ecols.setdefault("engine_away_matches_3d", []).append(a3d)
         ecols.setdefault("engine_away_matches_7d", []).append(a7d)
         ecols.setdefault("engine_away_matches_10d", []).append(a10d)
         ecols.setdefault("engine_away_matches_14d", []).append(a14d)
-        ecols.setdefault("engine_home_days_since_last", []).append(hds)
         ecols.setdefault("engine_away_days_since_last", []).append(ads)
-        ecols.setdefault("engine_home_midweek_last7", []).append(hmw7)
         ecols.setdefault("engine_away_midweek_last7", []).append(amw7)
 
+        # NEW tournament-aware flags
+        league = getattr(r, "league")
+        ecols.setdefault("engine_is_neutral", []).append(is_neutral_from_league(league))
+        ecols.setdefault("engine_comp_stage", []).append(stage_from_league(league))
+
+    # merge back to UPCOMING
     for k, v in ecols.items():
         up[k] = v
 
