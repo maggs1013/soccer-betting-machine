@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # Train a multinomial logistic feature model using domestic-only results for windows & samples,
 # while keeping robustness (missing league → GLOBAL) and time-decay weighting.
+# Safe momentum computations (no KeyErrors) via Series.get(..., NaN-series) fallbacks.
 
 import os, json, pickle
 import numpy as np
@@ -60,8 +61,8 @@ def build_long(H):
         columns={"away_team":"team","away_goals":"gf","home_goals":"ga"})
     long = pd.concat([h,a], ignore_index=True).sort_values("date")
     long["pts"] = 0
-    long.loc[long["gf"]>long["ga"], "pts"] = 3
-    long.loc[long["gf"]==long["ga"], "pts"] = 1
+    long.loc[long["gf"] > long["ga"], "pts"] = 3
+    long.loc[long["gf"] == long["ga"], "pts"] = 1
     return long
 
 def windows_ppg(long_dom, team, n):
@@ -80,7 +81,7 @@ def main():
         write_empty_model([], "HIST empty"); return
 
     long_all = build_long(hist)
-    long_dom = long_all[long_all["is_uefa"]==0]  # domestic only for windows & training
+    long_dom = long_all[long_all["is_uefa"]==0]  # domestic only
 
     # Build team list from available sources
     hyb = safe_read(HYB, ["team","xg_hybrid","xga_hybrid","xgd90_hybrid"])
@@ -124,7 +125,7 @@ def main():
         row["last7_ppg"]  = windows_ppg(long_dom, team, 7)
         row["last10_ppg"] = windows_ppg(long_dom, team, 10)
         row["season_ppg"] = season_ppg(long_dom, team, last_date.year)
-        # volatility from domestic
+        # volatility (domestic)
         g = long_dom[long_dom["team"]==team]
         if g.empty:
             row["goal_volatility_5"] = np.nan
@@ -137,21 +138,31 @@ def main():
 
     teamvec = teamvec.merge(tv_win, on="team", how="left")
 
-    # Ensure required window columns exist
-    for c in ["last3_ppg","last5_ppg","last7_ppg","last10_ppg","season_ppg",
-              "goal_volatility_5","goal_volatility_10"]:
-        if c not in teamvec.columns: teamvec[c] = np.nan
+    # Ensure required window columns exist (create NaN columns if missing)
+    ensure_cols = [
+        "last3_ppg","last5_ppg","last7_ppg","last10_ppg","season_ppg",
+        "goal_volatility_5","goal_volatility_10"
+    ]
+    for c in ensure_cols:
+        if c not in teamvec.columns:
+            teamvec[c] = np.nan
 
-    # Minimal xG window presence: last5_xgpg from FORM if available (proxy)
+    # Minimal xG window presence: last5_xgpg from FORM (proxy)
     form = safe_read(FORM, ["team","last5_xgpg"])
     if not form.empty:
         teamvec = teamvec.merge(form, on="team", how="left")
     else:
         teamvec["last5_xgpg"] = np.nan
 
-    # Contrasts
-    teamvec["ppg_momentum_3_10"]     = teamvec["last3_ppg"]  - teamvec["last10_ppg"]
-    teamvec["ppg_momentum_5_season"] = teamvec["last5_ppg"]  - teamvec["season_ppg"]
+    # ---- SAFE momentum computations (no KeyError) ----
+    nan_series = pd.Series(np.nan, index=teamvec.index)
+    last3_ppg   = teamvec.get("last3_ppg",   nan_series)
+    last10_ppg  = teamvec.get("last10_ppg",  nan_series)
+    last5_ppg   = teamvec.get("last5_ppg",   nan_series)
+    season_ppg  = teamvec.get("season_ppg",  nan_series)
+
+    teamvec["ppg_momentum_3_10"]     = last3_ppg - last10_ppg
+    teamvec["ppg_momentum_5_season"] = last5_ppg - season_ppg
 
     # Feature list
     numeric_cols = [
@@ -164,10 +175,10 @@ def main():
         "last5_xgpg"
     ]
     for c in numeric_cols:
-        if c not in teamvec.columns: teamvec[c] = np.nan
+        if c not in teamvec.columns:
+            teamvec[c] = np.nan
 
     # Build domestic-only training samples
-    # Use ONLY domestic results for labels/samples
     dom_matches = hist.copy()
     if "league" not in dom_matches.columns: dom_matches["league"]="GLOBAL"
     dom_matches = dom_matches[~dom_matches["league"].astype(str).apply(is_uefa)]
