@@ -205,11 +205,24 @@ def main():
     X = np.asarray(samples, dtype=float)
     y2 = np.asarray(labels, dtype=int)
     d_arr = pd.to_datetime(pd.Series(dates), errors="coerce")
-    max_date = hist["date"].max()
 
-    # Drop fully-NaN rows
-    mask = ~np.isnan(X).all(axis=1)
-    X = X[mask]; y2 = y2[mask]; d_arr = d_arr[mask]
+    # Safe max_date and safe Series math for days_back
+    max_hist_date = pd.to_datetime(hist["date"], errors="coerce").dropna()
+    max_date = max_hist_date.max() if not max_hist_date.empty else pd.Timestamp.utcnow()
+    if pd.isna(max_date):
+        max_date = pd.Timestamp.utcnow()
+
+    d_arr = pd.to_datetime(d_arr, errors="coerce")
+    # Turn into a Series explicitly, compute timedelta days safely
+    d_arr_series = pd.Series(d_arr).astype("datetime64[ns]")
+    days_back = (pd.Timestamp(max_date) - d_arr_series).dt.days
+    # Guard NaNs / negatives
+    days_back = days_back.fillna(0).clip(lower=0).astype(float).to_numpy()
+
+    # Drop rows where all features are NaN (keep weights aligned)
+    row_ok = ~np.isnan(X).all(axis=1)
+    X = X[row_ok]; y2 = y2[row_ok]; days_back = days_back[row_ok]
+
     if X.size == 0 or np.unique(y2).size < 3:
         write_empty_model([f"diff_{c}" for c in numeric_cols], "Not enough clean domestic samples/classes")
         return
@@ -221,14 +234,13 @@ def main():
     if nr.size: X[nr, nc] = col_medians[nc]
 
     # Time-decay sample weights
-    days_back = (max_date - d_arr).dt.days.clip(lower=0).astype(float)
     weights = np.power(0.5, days_back / HALF_LIFE_DAYS)
 
     scaler = StandardScaler()
     Xs = scaler.fit_transform(X)
 
     clf = LogisticRegression(multi_class="multinomial", max_iter=300, solver="lbfgs")
-    clf.fit(Xs, y2, sample_weight=weights.values)
+    clf.fit(Xs, y2, sample_weight=weights)
 
     feat_names = [f"diff_{c}" for c in numeric_cols]
     pickle.dump({"scaler": scaler, "model": clf, "feat_names": feat_names}, open(OUTM, "wb"))
