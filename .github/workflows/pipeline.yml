@@ -111,9 +111,12 @@ jobs:
       - name: Engineer extra variables
         run: python scripts/engineer_extra_variables.py
 
-      # NEW: seasonality
       - name: League seasonality enrichment
         run: python scripts/add_league_seasonality.py
+
+      # NEW: tag competitions for downstream selection
+      - name: Competition flags (UEFA tagging)
+        run: python scripts/add_competition_flags.py
 
       - name: Build HIST & UPCOMING
         run: python scripts/build_hist_and_upcoming.py
@@ -155,6 +158,10 @@ jobs:
 
       - name: Blend and calibrate (02 step)
         run: python scripts/02_blend_and_calibrate.py
+
+      # NEW: UEFA-only blend & calibrators
+      - name: Tournament blend & calibrate (UEFA only)
+        run: python scripts/train_tournament_blend_and_calibrate.py
 
       - name: Per-league blend weights table
         run: python scripts/per_league_blend_weights.py
@@ -207,21 +214,18 @@ jobs:
       - name: Line move log (AM vs T-60)
         run: python scripts/line_move_log.py
 
-      # NEW: odds move deltas (risk overlay variables)
       - name: Odds move deltas (features & overlay)
         run: python scripts/add_odds_move_deltas.py
 
       - name: Stacking log (BTTS meta-weights placeholder)
         run: python scripts/stacking_log.py
 
-      # ---- Triage helpers before auto-briefing ----
       - name: Make run index (one-screen triage)
         run: python scripts/make_run_index.py
 
       - name: Make flags per fixture (all blockers in one sheet)
         run: python scripts/make_flags_per_fixture.py
 
-      # ---- Auto dashboard (not binding) ----
       - name: Pipeline dashboard (auto)
         run: python scripts/council_briefing.py
 
