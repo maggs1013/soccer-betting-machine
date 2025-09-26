@@ -35,17 +35,14 @@ def main():
         else:
             raise SystemExit(f"SPI fetch failed and no cache available: {e}")
 
-    # keep commonly used columns if present
     wanted = {"team","league","spi","spi_off","spi_def","rank","off","def","global_team_id","date"}
     keep = [c for c in df.columns if c.lower() in wanted]
     if keep:
         df = df[keep]
 
     df.to_csv(OUT, index=False)
-    try:
-        df.to_csv(CACHE, index=False)
-    except Exception:
-        pass
+    try: df.to_csv(CACHE, index=False)
+    except Exception: pass
     print(f"✅ SPI wrote {len(df)} rows → {OUT}")
 
 if __name__ == "__main__":
