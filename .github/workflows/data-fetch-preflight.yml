@@ -3,7 +3,7 @@ name: SBM — Data Fetch & Preflight
 on:
   workflow_dispatch:
   schedule:
-    - cron: "5 */6 * * *"
+    - cron: "5 */6 * * *"   # every 6 hours
 
 concurrency:
   group: sbm-data-preflight
@@ -15,7 +15,7 @@ permissions:
 jobs:
   fetch-and-preflight:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120  # more headroom; FBref can be slow at times
     env:
       PYTHONUNBUFFERED: "1"
 
@@ -28,19 +28,46 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt', 'audit/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Cache soccerdata (provider cache)
+        uses: actions/cache@v4
+        with:
+          path: .cache/soccerdata
+          key: ${{ runner.os }}-soccerdata-${{ env.FBREF_LEAGUE }}-${{ env.FBREF_SEASON }}
+          restore-keys: |
+            ${{ runner.os }}-soccerdata-
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           if [ -f "requirements.txt" ]; then pip install -r requirements.txt; fi
           if [ -f "audit/requirements.txt" ]; then pip install -r audit/requirements.txt; fi
-          mkdir -p data reports
+          mkdir -p data reports .cache/soccerdata
 
       # ---- FETCHERS ----
+
       - name: Fetch SPI (robust; ci_width)
         run: python connectors/spi_fetch.py
 
-      - name: Fetch FBref team stats (multi-slice; cached fallback)
-        run: python connectors/fbref_fetch.py
+      # FBref with retry/backoff — if the runner kills once, try again
+      - name: Fetch FBref team stats (multi-slice; cached fallback; retry)
+        env:
+          FBREF_SLICES: ${{ vars.FBREF_SLICES }}  # optional: e.g. "standard,shooting,passing,keepers,goal_shot_creation,misc"
+        run: |
+          set -e
+          for i in 1 2 3; do
+            echo "FBref attempt $i..."
+            python connectors/fbref_fetch.py && break
+            echo "FBref attempt $i failed; sleeping before retry..."
+            sleep $((15 * i))
+          done
 
       - name: Fetch Odds + Fixtures (H2H + OU + BTTS + Spreads; two-key fallback)
         env:
@@ -60,6 +87,7 @@ jobs:
         run: python connectors/lineups_fetch.py
 
       # ---- PRIORS + ENRICH ----
+
       - name: Build cards/corners priors
         run: python scripts/ref_cards_corners_build.py
 
@@ -73,6 +101,7 @@ jobs:
         run: python scripts/rolling_form_build.py
 
       # ---- FEATURES + RISK ----
+
       - name: Build feature diffs & coherence features
         run: python scripts/feature_patcher.py
 
@@ -83,6 +112,7 @@ jobs:
         run: python scripts/kelly_policy_update.py
 
       # ---- MODEL MATRIX ----
+
       - name: Build model-ready matrix
         run: python scripts/model_matrix_build.py
 
@@ -90,6 +120,7 @@ jobs:
         run: python scripts/model_matrix_validate.py
 
       # ---- BRIEFING ----
+
       - name: Append source alerts to AUTO_BRIEFING.md
         run: |
           mkdir -p reports
@@ -108,6 +139,7 @@ jobs:
           } >> reports/AUTO_BRIEFING.md
 
       # ---- ARTIFACTS ----
+
       - name: Upload data & reports
         uses: actions/upload-artifact@v4
         with:
