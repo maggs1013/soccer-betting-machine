@@ -3,7 +3,7 @@ name: SBM — Data Fetch & Preflight
 on:
   workflow_dispatch:
   schedule:
-    - cron: "5 */6 * * *"
+    - cron: "5 */6 * * *"   # every 6 hours
 
 concurrency:
   group: sbm-data-preflight
@@ -15,7 +15,7 @@ permissions:
 jobs:
   fetch-and-preflight:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 45
     env:
       PYTHONUNBUFFERED: "1"
 
@@ -31,47 +31,62 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          # Install root requirements if present
           if [ -f "requirements.txt" ]; then pip install -r requirements.txt; fi
+          # Install audit requirements (pins soccerdata from GitHub)
           if [ -f "audit/requirements.txt" ]; then pip install -r audit/requirements.txt; fi
           mkdir -p data reports
 
-      - name: Fetch SPI (robust)
+      # ---- CONNECTOR FETCHERS ----
+      - name: Fetch SPI (robust; cached fallback)
         run: python connectors/spi_fetch.py
 
-      - name: Fetch FBref team stats (multi-slice)
+      - name: Fetch FBref team stats (multi-slice; cached fallback)
         run: python connectors/fbref_fetch.py
 
-      - name: Fetch Odds + Fixtures (two-key + normalized markets)
+      - name: Fetch Odds + Fixtures (resilient, two-key fallback)
         env:
           THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
           THE_ODDS_API_KEY_BACKUP: ${{ secrets.THE_ODDS_API_KEY_BACKUP }}
         run: python connectors/multi_odds_fetch.py
 
-      - name: Fetch Lineups (API-FOOTBALL)
+      - name: Attach API-FOOTBALL IDs to fixtures
         env:
-          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}                     # optional but recommended
+          API_FOOTBALL_LEAGUE_IDS: ${{ vars.API_FOOTBALL_LEAGUE_IDS }}          # optional (comma-separated ids)
+        run: python connectors/api_football_attach_ids.py
+
+      - name: Fetch lineups (actual starters → availability/injury indices)
+        env:
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}                     # optional; script is safe if absent
         run: python connectors/lineups_fetch.py
 
-      - name: Alias audit (unmapped names)
-        run: python scripts/alias_audit.py
+      # ---- AUDIT + ENRICH ----
+      - name: Audit team/league mappings
+        run: python scripts/mapping_audit.py
 
-      - name: Enrich upcoming fixtures (features for modeling)
+      - name: Enrich features (safe + schema-agnostic)
         run: python scripts/enrich_features.py
 
+      # ---- APPEND SOURCE ALERTS TO BRIEFING ----
       - name: Append source alerts to AUTO_BRIEFING.md
         run: |
           mkdir -p reports
           if [ ! -f reports/AUTO_BRIEFING.md ]; then echo "# AUTO BRIEFING" > reports/AUTO_BRIEFING.md; fi
           python scripts/alerts_autobriefing_append.py
-          echo "" >> reports/AUTO_BRIEFING.md
-          echo "## Odds Key Usage (from ODDS_ALERTS.md)" >> reports/AUTO_BRIEFING.md
-          if [ -f reports/ODDS_ALERTS.md ]; then
-            echo "" >> reports/AUTO_BRIEFING.md
-            tail -n +1 reports/ODDS_ALERTS.md >> reports/AUTO_BRIEFING.md
-          else
-            echo "- No ODDS_ALERTS.md found this run." >> reports/AUTO_BRIEFING.md
-          fi
+          {
+            echo "";
+            echo "## Odds Key Usage";
+            if [ -f reports/ODDS_ALERTS.md ]; then
+              echo "";
+              echo "**From ODDS_ALERTS.md:**";
+              cat reports/ODDS_ALERTS.md;
+            else
+              echo "- No ODDS_ALERTS.md found this run.";
+            fi
+          } >> reports/AUTO_BRIEFING.md
 
+      # ---- PUBLISH ARTIFACTS ----
       - name: Upload data & reports
         uses: actions/upload-artifact@v4
         with:
