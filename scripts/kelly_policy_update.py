@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-kelly_policy_update.py — adjust stakes using market risk signals (FINAL)
+kelly_policy_update.py — risk-aware stake modulation (FINAL)
 Inputs:
   data/PREDICTIONS_7D.csv
   data/CONSISTENCY_CHECKS.csv
   data/UPCOMING_7D_enriched.csv
+  data/leagues_allowlist.csv  (optional; expected col: league, liquidity_tier in {1,2,3})
 Outputs:
   data/ACTIONABILITY_REPORT.csv
 
 Policy:
-- Start with base_kelly in PREDICTIONS_7D.csv (if missing, assume 1.0 unit)
-- Downweight if:
-    A) Any contradiction flags (BTTS_vs_OU)
-    B) High dispersion (>=12) with no opening/closing timing
-    C) OU vs SPI divergence (new)
-- final_stake = clip(base_kelly * stake_factor, 0..1)
+  final_stake = base_kelly * factor, where factor in (0,1] adjusted by:
+  - A) market contradictions (BTTS_vs_OU)        → ×0.6
+  - B) high dispersion without timing (>=12)     → ×0.7
+  - C) OU vs SPI divergence                      → ×0.5
+  - D) liquidity tier (1→×1.0, 2→×0.85, 3→×0.7)
 """
 
 import os
@@ -25,6 +25,7 @@ DATA = "data"
 PRED = os.path.join(DATA, "PREDICTIONS_7D.csv")
 CONS = os.path.join(DATA, "CONSISTENCY_CHECKS.csv")
 ENR  = os.path.join(DATA, "UPCOMING_7D_enriched.csv")
+ALLOW= os.path.join(DATA, "leagues_allowlist.csv")
 OUT  = os.path.join(DATA, "ACTIONABILITY_REPORT.csv")
 
 def safe_read(path):
@@ -42,6 +43,7 @@ def main():
     pred = safe_read(PRED)
     cons = safe_read(CONS)
     enr  = safe_read(ENR)
+    allow= safe_read(ALLOW)
 
     if pred.empty:
         pd.DataFrame(columns=["fixture_id","selection","base_kelly","stake_factor","final_stake","reasons"]).to_csv(OUT, index=False)
@@ -56,11 +58,16 @@ def main():
     if not cons.empty and {"fixture_id","flag"}.issubset(cons.columns):
         flag_sum = cons.groupby("fixture_id")["flag"].sum().to_dict()
 
-    disp_map, open_map, close_map = {}, {}, {}
+    disp_map, open_map, close_map, lg_map = {}, {}, {}, {}
     if not enr.empty and "fixture_id" in enr.columns:
         if "bookmaker_count"   in enr.columns: disp_map  = dict(zip(enr["fixture_id"], enr["bookmaker_count"]))
         if "has_opening_odds"  in enr.columns: open_map  = dict(zip(enr["fixture_id"], enr["has_opening_odds"]))
         if "has_closing_odds"  in enr.columns: close_map = dict(zip(enr["fixture_id"], enr["has_closing_odds"]))
+        if "league"            in enr.columns: lg_map    = dict(zip(enr["fixture_id"], enr["league"]))
+
+    tier_map = {}
+    if not allow.empty and {"league","liquidity_tier"}.issubset(allow.columns):
+        tier_map = dict(zip(allow["league"], allow["liquidity_tier"]))
 
     rows = []
     for _, r in pred.iterrows():
@@ -88,17 +95,28 @@ def main():
         except Exception:
             pass
 
-        # C) OU vs SPI divergence flag
+        # C) OU vs SPI divergence
         if not cons.empty and {"fixture_id","check"}.issubset(cons.columns):
             sub = cons[(cons["fixture_id"]==fid) & (cons["check"]=="OU_vs_SPI")]
             if not sub.empty:
                 factor *= 0.5
                 reasons.append("ou_vs_spi_divergence")
 
+        # D) Liquidity tier scaling
+        lg = lg_map.get(fid, None)
+        tier = int(tier_map.get(lg, 1)) if lg is not None else 1
+        if tier == 2:
+            factor *= 0.85
+            reasons.append("liquidity_tier_2")
+        elif tier == 3:
+            factor *= 0.70
+            reasons.append("liquidity_tier_3")
+
         final = max(0.0, min(1.0, base * factor))
         rows.append({
             "fixture_id": fid,
             "selection": sel,
+            "league": lg,
             "base_kelly": base,
             "stake_factor": round(factor, 3),
             "final_stake": round(final, 3),
