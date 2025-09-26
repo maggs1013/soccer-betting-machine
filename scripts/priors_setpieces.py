@@ -24,16 +24,17 @@ def main():
     if "fixture_id" not in up.columns:
         def mk_id(r):
             d=str(r.get("date","NA")).replace("-","").replace("T","_").replace(":","")
-            h=str(r.get("home_team","NA"]).strip().lower().replace(" ","_")
-            a=str(r.get("away_team","NA"]).strip().lower().replace(" ","_")
+            h=str(r.get("home_team","NA")).strip().lower().replace(" ","_")
+            a=str(r.get("away_team","NA")).strip().lower().replace(" ","_")
             return f"{d}__{h}__vs__{a}"
         up["fixture_id"]=up.apply(mk_id, axis=1)
 
     def g(c): return pd.to_numeric(up.get(c, np.nan), errors="coerce")
     sp   = g("home_setpiece_share") - g("away_setpiece_share")
     crd_d= g("home_avg_cards") - g("away_avg_cards")   # seasonal priors
-    ref  = g("ref_avg_cards")                          # ref prior
-    # proxy dead-ball xg prior in [ -0.35 , +0.35 ]
+    ref  = g("ref_avg_cards")                          # referee prior
+
+    # proxy dead-ball xG prior in [ -0.35 , +0.35 ]
     prior = (0.60*sp.fillna(0) + 0.25*crd_d.fillna(0) + 0.15*(ref.fillna(0)-3.5)/3.5).clip(-0.35, 0.35)
     home = prior; away = -prior
 
