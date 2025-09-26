@@ -15,7 +15,7 @@ permissions:
 jobs:
   fetch-and-preflight:
     runs-on: ubuntu-latest
-    timeout-minutes: 120  # more headroom; FBref can be slow at times
+    timeout-minutes: 120   # more headroom for provider hiccups
     env:
       PYTHONUNBUFFERED: "1"
 
@@ -56,18 +56,22 @@ jobs:
       - name: Fetch SPI (robust; ci_width)
         run: python connectors/spi_fetch.py
 
-      # FBref with retry/backoff — if the runner kills once, try again
-      - name: Fetch FBref team stats (multi-slice; cached fallback; retry)
+      # STREAMLINED FBREF: fetch & save each slice (retry if runner hiccups)
+      - name: Fetch FBref slices → data/fbref_slice_*.csv (retry)
         env:
-          FBREF_SLICES: ${{ vars.FBREF_SLICES }}  # optional: e.g. "standard,shooting,passing,keepers,goal_shot_creation,misc"
+          FBREF_SLICES: ${{ vars.FBREF_SLICES }}  # optional, e.g. "standard,shooting,passing,keepers,goal_shot_creation,misc"
         run: |
           set -e
           for i in 1 2 3; do
-            echo "FBref attempt $i..."
-            python connectors/fbref_fetch.py && break
-            echo "FBref attempt $i failed; sleeping before retry..."
+            echo "FBref slice fetch attempt $i..."
+            python connectors/fbref_fetch_streamlined.py && break
+            echo "FBref slice fetch attempt $i failed; sleeping before retry..."
             sleep $((15 * i))
           done
+
+      # Merge the saved slices into sd_fbref_team_stats.csv (lightweight)
+      - name: Merge FBref slices → sd_fbref_team_stats.csv
+        run: python scripts/fbref_merge_slices.py
 
       - name: Fetch Odds + Fixtures (H2H + OU + BTTS + Spreads; two-key fallback)
         env:
