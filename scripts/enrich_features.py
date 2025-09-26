@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """
-enrich_features.py — robust enrichment pass (FINAL)
+enrich_features.py — robust enrichment pass (FINAL, per-slice FBref ingestion)
+
 - Safe with missing inputs; always writes a valid UPCOMING_7D_enriched.csv
-- Adds odds (H2H already in fixtures) + OU/BTTS/spreads when present
-- Adds FBref multi-slice columns (schema-agnostic)
-- Adds SPI rank and spi_ci_width (mapped to home/away)
+- Adds odds extras (OU/BTTS/spreads) when present in fixtures
+- Adds SPI rank and spi_ci_width (home/away)
 - Adds lineups/injury/availability + experienced starters pct (provider)
 - Adds seasonal cards/corners priors (team & referee) from Football-Data.org
+- Adds FBref per-slice metrics by reading data/fbref_slice_<slice>.csv
 - Preserves referee, crowd, travel enrichments
 """
 
 import os
+import re
 import numpy as np
 import pandas as pd
 
@@ -21,9 +23,23 @@ LINEUPS   = os.path.join(DATA, "lineups.csv")
 REFS      = os.path.join(DATA, "referee_tendencies.csv")      # optional
 STADIUM   = os.path.join(DATA, "stadium_crowd.csv")           # optional
 TRAVEL    = os.path.join(DATA, "travel_matrix.csv")           # optional
-FBREF     = os.path.join(DATA, "sd_fbref_team_stats.csv")
 SPI       = os.path.join(DATA, "sd_538_spi.csv")
-RCC       = os.path.join(DATA, "ref_cards_corners.csv")       # NEW (cards/corners priors)
+RCC       = os.path.join(DATA, "ref_cards_corners.csv")       # team/ref priors
+
+# FBref per-slice CSVs produced by connectors/fbref_fetch_streamlined.py
+FBREF_SLICE = {
+    "standard":            os.path.join(DATA, "fbref_slice_standard.csv"),
+    "shooting":            os.path.join(DATA, "fbref_slice_shooting.csv"),
+    "passing":             os.path.join(DATA, "fbref_slice_passing.csv"),
+    "keepers":             os.path.join(DATA, "fbref_slice_keepers.csv"),
+    "keepers_adv":         os.path.join(DATA, "fbref_slice_keepers_adv.csv"),
+    "goal_shot_creation":  os.path.join(DATA, "fbref_slice_goal_shot_creation.csv"),
+    "defense":             os.path.join(DATA, "fbref_slice_defense.csv"),
+    "misc":                os.path.join(DATA, "fbref_slice_misc.csv"),
+    "passing_types":       os.path.join(DATA, "fbref_slice_passing_types.csv"),
+    "possession":          os.path.join(DATA, "fbref_slice_possession.csv"),
+    "playing_time":        os.path.join(DATA, "fbref_slice_playing_time.csv"),
+}
 
 SAFE_DEFAULTS = {
     "home_injury_index": 0.30, "away_injury_index": 0.30,
@@ -65,6 +81,45 @@ def normalize_fixture_id(row):
     a = str(row.get("away_team","NA")).strip().lower().replace(" ","_")
     return f"{d}__{h}__vs__{a}"
 
+def num(s):
+    try: return pd.to_numeric(s, errors="coerce")
+    except Exception: return s
+
+def best_col(df, patterns):
+    """Return first column whose name matches any regex in patterns."""
+    for p in patterns:
+        for c in df.columns:
+            if re.search(p, str(c), flags=re.I):
+                return c
+    return None
+
+def merge_slice_feature(up, slice_df, home_name, away_name, feature_patterns):
+    """
+    Map a single numeric column from a slice onto home/away columns.
+    feature_patterns: list of regexes to match column in slice_df
+    """
+    if slice_df.empty: 
+        up[home_name] = np.nan; up[away_name] = np.nan
+        return up
+
+    key_cols = [c for c in ["team","league","season"] if c in slice_df.columns]
+    col = best_col(slice_df, feature_patterns)
+    if not col or len(key_cols) < 2:  # need at least team & league
+        up[home_name] = np.nan; up[away_name] = np.nan
+        return up
+
+    # HOME
+    home_df = slice_df[key_cols + [col]].drop_duplicates(key_cols).rename(columns={col: home_name})
+    up = up.merge(home_df, left_on=["home_team","league"], right_on=["team","league"], how="left")
+    up.drop(columns=[c for c in ["team","season"] if c in up.columns and c not in ["home_team","league"]], inplace=True, errors="ignore")
+
+    # AWAY
+    away_df = slice_df[key_cols + [col]].drop_duplicates(key_cols).rename(columns={col: away_name})
+    up = up.merge(away_df, left_on=["away_team","league"], right_on=["team","league"], how="left")
+    up.drop(columns=[c for c in ["team","season"] if c in up.columns and c not in ["away_team","league"]], inplace=True, errors="ignore")
+
+    return up
+
 def main():
     up = safe_read(UP_PATH)
     fx = safe_read(FIX_PATH)
@@ -94,8 +149,7 @@ def main():
             if "spread_home_line" in up.columns or "spread_away_line" in up.columns: up["has_spread"] = 1
 
     # --- Lineups: injuries/availability + experienced starters pct ---
-    ln = safe_read(LINEUPS, ["fixture_id","home_injury_index","away_injury_index",
-                             "home_avail","away_avail","home_exp_starters_pct","away_exp_starters_pct"])
+    ln = safe_read(LINEUPS, ["fixture_id","home_injury_index","away_injury_index","home_avail","away_avail","home_exp_starters_pct","away_exp_starters_pct"])
     if not ln.empty and "fixture_id" in ln.columns:
         ln = ln.drop_duplicates("fixture_id")
         up = up.merge(ln, on="fixture_id", how="left", suffixes=("", "_ln"))
@@ -116,27 +170,32 @@ def main():
             up["home_spi_ci_width"] = up["home_team"].astype(str).map(wmap)
             up["away_spi_ci_width"] = up["away_team"].astype(str).map(wmap)
 
-    # --- FBref multi-slice join (schema-agnostic) ---
-    fb = safe_read(FBREF)
-    if not fb.empty and {"team","league","season"}.issubset(fb.columns):
-        key_cols = {"team","league","season"}
-        other_cols = [c for c in fb.columns if c not in key_cols]
-        fb_red = fb[list(key_cols) + other_cols].copy()
+    # --- FBref per-slice features (read directly from slice CSVs) ---
+    # Passing: try completion % column
+    passing = safe_read(FBREF_SLICE["passing"])
+    up = merge_slice_feature(up, passing, "home_pass_pct", "away_pass_pct",
+                             feature_patterns=[r"Cmp%|Pass%|Cmp_perc|passing.*(pct|%)"])
 
-        fb_home = fb_red.copy()
-        fb_home.columns = [f"home_{c}" if c not in ("team","league","season") else c for c in fb_home.columns]
-        up = up.merge(fb_home, left_on=["home_team","league"], right_on=["team","league"], how="left")
-        up.drop(columns=["team","season"], errors="ignore", inplace=True)
+    # Keepers: try PSxG prevented (or similar)
+    keepers = safe_read(FBREF_SLICE["keepers"])
+    up = merge_slice_feature(up, keepers, "home_gk_psxg_prevented", "away_gk_psxg_prevented",
+                             feature_patterns=[r"PSxG[+|-]G|psxg.*prevent|gk.*prevent|psxg_minus_ga"])
 
-        fb_away = fb_red.copy()
-        fb_away.columns = [f"away_{c}" if c not in ("team","league","season") else c for c in fb_away.columns]
-        up = up.merge(fb_away, left_on=["away_team","league"], right_on=["team","league"], how="left")
-        up.drop(columns=["team","season"], errors="ignore", inplace=True)
+    # GCA/SCA: goal/shot creation actions per 90 (if present)
+    gca = safe_read(FBREF_SLICE["goal_shot_creation"])
+    up = merge_slice_feature(up, gca, "home_sca90", "away_sca90",
+                             feature_patterns=[r"\bSCA/90\b|sca.*90"])
+    up = merge_slice_feature(up, gca, "home_gca90", "away_gca90",
+                             feature_patterns=[r"\bGCA/90\b|gca.*90"])
 
-    # --- Cards & corners priors (NEW; optional) ---
+    # Defense/Misc: cards per match (fallback if priors missing)
+    misc = safe_read(FBREF_SLICE["misc"])
+    up = merge_slice_feature(up, misc, "home_cards_per_match", "away_cards_per_match",
+                             feature_patterns=[r"cards_per_?match|Cards/Match|cards/90"])
+
+    # --- Cards & corners priors (team/referee) ---
     rcc = safe_read(RCC)
     if not rcc.empty and {"league","team","season"}.issubset(rcc.columns):
-        # Team-level priors → join twice
         for side in ["home","away"]:
             sub = rcc.rename(columns={"team":f"{side}_team"})
             keep = [f"{side}_team","league","season","avg_cards","avg_corners"]
@@ -144,7 +203,6 @@ def main():
             if len(keep) >= 4:
                 up = up.merge(sub[keep], on=[f"{side}_team","league"], how="left")
                 up.rename(columns={"avg_cards":f"{side}_avg_cards","avg_corners":f"{side}_avg_corners"}, inplace=True)
-        # Referee prior if 'referee' exists in both tables
         if "referee" in up.columns and "referee" in rcc.columns and "ref_avg_cards" in rcc.columns:
             up = up.merge(rcc[["referee","ref_avg_cards"]].drop_duplicates("referee"),
                           on="referee", how="left")
