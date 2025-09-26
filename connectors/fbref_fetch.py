@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-FBref team stats via soccerdata (2025-safe, multi-slice, duplicate-proof, index-safe)
+FBref team stats via soccerdata (2025-safe, multi-slice, duplicate-proof, index-safe, memory-safe)
 
 - Instantiates FBref with leagues + seasons (API expects this at construction)
 - Pulls multiple stat_types and outer-merges them on [team, league, season]
-- Unconditionally resets slice index, normalizes column names, ensures KEYS exist
-- Suffixes ALL non-key columns per slice; guarantees uniqueness
+- Unconditionally resets slice index, normalizes headers, ensures KEYS exist
+- Drops all-NaN columns from slices, suffixes ALL non-key columns per slice, guarantees uniqueness
+- Skips empty/useless slices, logs slice shapes, merges incrementally to reduce memory spikes
 - Falls back to cache if live fetch fails; writes minimal stub if no cache
 
 Outputs:
@@ -40,35 +41,29 @@ KEYS = ("team", "league", "season")
 
 
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Force columns to string, strip whitespace, collapse inner spaces."""
+    """Force columns to string & strip whitespace."""
     df.columns = [str(c).strip() for c in df.columns]
     return df
 
 
 def _suffix_and_dedupe(df: pd.DataFrame, stat_type: str) -> pd.DataFrame:
-    """
-    After keys exist as columns, suffix every NON-KEY with _{stat_type}
-    and ensure final uniqueness across all columns.
-    """
-    # First pass: suffix
-    rename_map = {}
-    for c in list(df.columns):
-        if c not in KEYS:
-            rename_map[c] = f"{c}_{stat_type}"
+    """Suffix every NON-KEY with _{stat_type} and enforce uniqueness."""
+    # Suffix
+    rename_map = {c: f"{c}_{stat_type}" for c in list(df.columns) if c not in KEYS}
     df = df.rename(columns=rename_map)
 
-    # Second pass: enforce uniqueness
+    # De-dupe
     seen = set()
-    uniq = []
+    new_cols = []
     for c in df.columns:
-        new_c = c
-        while new_c in seen:
-            new_c = f"{new_c}_dup"
-        uniq.append(new_c)
-        seen.add(new_c)
-    df.columns = uniq
+        nc = c
+        while nc in seen:
+            nc = f"{nc}_dup"
+        new_cols.append(nc)
+        seen.add(nc)
+    df.columns = new_cols
 
-    # Order keys first
+    # Keys first
     key_cols = list(KEYS)
     other = [c for c in df.columns if c not in key_cols]
     return df[key_cols + other]
@@ -76,48 +71,51 @@ def _suffix_and_dedupe(df: pd.DataFrame, stat_type: str) -> pd.DataFrame:
 
 def _clean_slice(df: pd.DataFrame, stat_type: str) -> pd.DataFrame:
     """
-    Reset index UNCONDITIONALLY, normalize headers, ensure KEYS as columns,
-    then suffix/dedupe.
+    Reset index, normalize headers, ensure KEYS as columns,
+    drop all-NaN columns, then suffix/dedupe.
     """
     if df is None or df.empty:
         return pd.DataFrame(columns=list(KEYS))
 
-    # Always reset index to pull any key info out of the index
+    # Always reset index to pull key info out of index
     df = df.reset_index(drop=True)
-
-    # Normalize header names (strings, no stray whitespace)
     df = _normalize_columns(df)
 
-    # Ensure KEYS exist (as columns)
+    # Ensure keys exist as columns
     for k in KEYS:
         if k not in df.columns:
             df[k] = None
 
-    # Now suffix and de-dupe all non-key columns for this slice
-    df = _suffix_and_dedupe(df, stat_type)
-    return df
+    # Drop all-NaN columns (soccerdata sometimes returns placeholders)
+    df = df.dropna(axis=1, how="all")
+
+    # If only keys remain, there's nothing useful
+    non_keys = [c for c in df.columns if c not in KEYS]
+    if not non_keys:
+        return pd.DataFrame(columns=list(KEYS))
+
+    return _suffix_and_dedupe(df, stat_type)
 
 
 def _read_slice(fb, stat_type: str) -> pd.DataFrame | None:
-    """Fetch one stat slice via soccerdata and clean it to a safe, mergeable frame."""
+    """Fetch one stat slice and clean it; log shape for visibility."""
     try:
         raw = fb.read_team_season_stats(stat_type=stat_type)
-    except Exception:
+    except Exception as e:
+        print(f"[FBref] slice {stat_type} failed: {e}")
         return None
+
     if raw is None or raw.empty:
+        print(f"[FBref] slice {stat_type} is empty")
         return None
-    return _clean_slice(raw, stat_type)
 
+    df = _clean_slice(raw, stat_type)
+    if df.empty or df.drop(columns=list(KEYS)).shape[1] == 0:
+        print(f"[FBref] slice {stat_type} has no usable columns after cleaning")
+        return None
 
-def _merge_slices(parts: list[pd.DataFrame]) -> pd.DataFrame:
-    """Outer-merge all cleaned slices on KEYS (all non-keys already unique)."""
-    merged = parts[0]
-    for sl in parts[1:]:
-        merged = pd.merge(merged, sl, on=list(KEYS), how="outer")
-    # Keys first
-    key_cols = list(KEYS)
-    other = [c for c in merged.columns if c not in key_cols]
-    return merged[key_cols + other]
+    print(f"[FBref] slice {stat_type} shape={df.shape}")
+    return df
 
 
 def main():
@@ -127,18 +125,20 @@ def main():
     for _ in range(tries):
         try:
             import soccerdata as sd
-            # API requires leagues & seasons on construction
+            # API expects leagues & seasons on construction
             fb = sd.FBref(leagues=COMP, seasons=[SEASON])
 
             parts: list[pd.DataFrame] = []
             for st in STAT_TYPES:
-                print(f"[FBref] fetching slice: {st}")
                 sl = _read_slice(fb, st)
                 if sl is not None and not sl.empty:
                     parts.append(sl)
 
             if parts:
-                merged = _merge_slices(parts)
+                # Incremental outer-merge to avoid huge temporary frames
+                merged = parts[0]
+                for sl in parts[1:]:
+                    merged = pd.merge(merged, sl, on=list(KEYS), how="outer")
             break
         except Exception as e:
             err = e
