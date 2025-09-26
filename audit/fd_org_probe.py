@@ -1,7 +1,6 @@
-import argparse, pandas as pd, io, requests, re
+import argparse, requests
 from utils import write_json
 
-# Football-Data.org season CSV index: static file list page; adjust if you keep a curated list
 INDEX = "https://www.football-data.co.uk/englandm.php"
 
 def main():
@@ -13,8 +12,7 @@ def main():
     try:
         r = requests.get(INDEX, timeout=25)
         meta["ok"] = (r.status_code == 200)
-        # We don’t scrape aggressively here; you may maintain a curated list instead
-        meta["note"] = "Index reachable; recommend curated CSV list per league/season."
+        meta["note"] = "Index reachable; maintain curated CSV list per league/season for reliability."
     except Exception as e:
         meta["note"] = f"Probe failed: {e}"
 
