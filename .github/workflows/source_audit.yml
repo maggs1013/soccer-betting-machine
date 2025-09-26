@@ -3,7 +3,7 @@ name: Source Audit (SBM)
 on:
   workflow_dispatch:
   schedule:
-    - cron: "15 */6 * * *"   # every 6h
+    - cron: "15 */6 * * *"  # every 6 hours
 
 permissions:
   contents: read
@@ -11,20 +11,20 @@ permissions:
 jobs:
   source-audit:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
-      ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}   # set in repo secrets
-      STATS_BOMB_TOKEN: ${{ secrets.STATS_BOMB_TOKEN }} # if applicable
-      UNDERSTAT_EMAIL: ${{ secrets.UNDERSTAT_EMAIL }}   # if applicable
+      ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+      STATS_BOMB_TOKEN: ${{ secrets.STATS_BOMB_TOKEN }}   # optional
+      UNDERSTAT_EMAIL: ${{ secrets.UNDERSTAT_EMAIL }}     # optional
       UNDERSTAT_PASSWORD: ${{ secrets.UNDERSTAT_PASSWORD }}
-      SOCCERDATA_CACHE: .cache/soccerdata          # local cache folder
+      SOCCERDATA_CACHE: .cache/soccerdata
       PYTHONUNBUFFERED: "1"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -34,7 +34,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r audit/requirements.txt
 
-      - name: Prepare cache dirs
+      - name: Prepare dirs
         run: |
           mkdir -p .cache/soccerdata
           mkdir -p reports
@@ -42,9 +42,9 @@ jobs:
 
       - name: Probe sources (APIs, coverage, schemas)
         run: |
-          python audit/odds_probe.py --key "${ODDS_API_KEY}" --out reports/odds_probe.json
+          python audit/odds_probe.py --key "${ODDS_API_KEY}" --config audit/config.py --out reports/odds_probe.json
           python audit/soccerdata_probe.py --cache "${SOCCERDATA_CACHE}" --out reports/soccerdata_probe.json
-          python audit/spi_probe.py --out reports/spi_probe.json
+          python audit/spi_probe.py --cache data --out reports/spi_probe.json
           python audit/understat_probe.py --out reports/understat_probe.json
           python audit/statsbomb_probe.py --token "${STATS_BOMB_TOKEN}" --out reports/statsbomb_probe.json
           python audit/fd_org_probe.py --out reports/football_data_probe.json
@@ -59,6 +59,8 @@ jobs:
             --statsbomb reports/statsbomb_probe.json \
             --footballdata reports/football_data_probe.json \
             --hist data/HIST_matches.csv \
+            --fixtures data/UPCOMING_fixtures.csv \
+            --enriched data/UPCOMING_7D_enriched.csv \
             --outdir reports
 
       - name: Upload artifacts
