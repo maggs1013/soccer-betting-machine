@@ -110,6 +110,23 @@ jobs:
       - name: Build rolling form (exp-decay)
         run: python scripts/rolling_form_exp_decay.py
 
+      # --------------- MINI-PRIOR MODELS ---------------
+
+      - name: Build xG prior (sim)
+        run: python scripts/priors_xg_sim.py
+
+      - name: Build availability prior
+        run: python scripts/priors_availability.py
+
+      - name: Build set-piece prior
+        run: python scripts/priors_setpieces.py
+
+      - name: Build market-move prior
+        run: python scripts/priors_market_move.py
+
+      - name: Build uncertainty prior
+        run: python scripts/priors_uncertainty.py
+
       # --------------- FEATURES + RISK ---------------
 
       - name: Build feature diffs & coherence features
@@ -132,10 +149,13 @@ jobs:
       - name: Build calibration report
         run: python scripts/calibration_report_build.py
 
-      # --------------- OPTIONAL TRAINER ---------------
-      # This will no-op safely if data/TRAIN_MATRIX.csv is missing.
+      # --------------- OPTIONAL TRAINERS ---------------
+
       - name: Train minimal model (rolling CV + per-league isotonic)
         run: python scripts/trainer_minimal.py
+
+      - name: Train stack (base + priors + contradictions)
+        run: python scripts/stack_trainer.py
 
       # --------------- BRIEFING / SLOs ---------------
 
