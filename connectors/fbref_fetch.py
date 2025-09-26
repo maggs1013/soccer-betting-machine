@@ -1,23 +1,12 @@
 #!/usr/bin/env python3
 """
-FBref team stats via soccerdata (2025-safe, multi-slice, duplicate-proof, index-safe, memory-safe)
-
-- Instantiates FBref with leagues + seasons (API expects this at construction)
-- Pulls multiple stat_types and outer-merges them on [team, league, season]
-- Resets index to columns, normalizes headers, maps team aliases → 'team'
-- Ensures KEYS exist and NEVER drops them (drops only non-key all-NaN columns)
-- Suffixes ALL non-key columns per slice; guarantees uniqueness
-- Skips empty/useless slices, logs slice shapes, incremental merges
-- Falls back to cache; writes stub if no cache
-
+FBref team stats via soccerdata (final hardened)
+- Multi-slice with synonyms → canonical stat_types supported by your soccerdata
+- Index-safe (always reset_index), key-alias mapping, non-key all-NaN drop
+- Duplicate-proof suffixing, incremental merges, cache fallback
 Outputs:
-    data/sd_fbref_team_stats.csv
-    data/sd_fbref_team_stats.cache.csv
-
-Env (optional):
-  FBREF_LEAGUE="ENG-Premier League"
-  FBREF_SEASON="2024-2025"
-  FBREF_SLICES="standard,shooting,passing,keeper,defense,gca,misc"
+  data/sd_fbref_team_stats.csv
+  data/sd_fbref_team_stats.cache.csv
 """
 
 import os
@@ -31,14 +20,32 @@ CACHE = os.path.join(DATA_DIR, "sd_fbref_team_stats.cache.csv")
 COMP   = os.environ.get("FBREF_LEAGUE", "ENG-Premier League")
 SEASON = os.environ.get("FBREF_SEASON", "2024-2025")
 
-ENV_SLICES = os.environ.get("FBREF_SLICES", "")
-if ENV_SLICES.strip():
-    STAT_TYPES = [s.strip() for s in ENV_SLICES.split(",") if s.strip()]
+# Canonical groups and synonyms (robust to soccerdata versions)
+CANONICAL_SLICES = {
+    "standard":            ["standard"],
+    "shooting":            ["shooting"],
+    "passing":             ["passing"],
+    "passing_types":       ["passing_types", "pass_types", "passing-types"],
+    "defense":             ["defense", "defending", "defensive_actions"],
+    "possession":          ["possession"],
+    "playing_time":        ["playing_time", "time"],
+    "keepers":             ["keepers", "keeper", "gk"],
+    "keepers_adv":         ["keepers_adv", "keeper_adv", "keepers-adv", "gk_adv"],
+    "goal_shot_creation":  ["goal_shot_creation", "gca"],
+    "misc":                ["misc", "miscellaneous"],
+}
+
+# If FBREF_SLICES provided, filter to those canonical keys (not synonyms)
+ENV_SLICES = [s.strip() for s in os.environ.get("FBREF_SLICES","").split(",") if s.strip()]
+if ENV_SLICES:
+    CANONICAL_ORDER = [k for k in CANONICAL_SLICES if k in ENV_SLICES]
 else:
-    STAT_TYPES = ["standard", "shooting", "passing", "keeper", "defense", "gca", "misc"]
+    CANONICAL_ORDER = list(CANONICAL_SLICES.keys())
 
 KEYS = ("team", "league", "season")
-TEAM_ALIASES = ("Squad", "squad", "Team", "team_name", "club", "Club")
+TEAM_ALIASES   = ("Squad", "squad", "Team", "team_name", "club", "Club")
+LEAGUE_ALIASES = ("Comp", "comp", "League", "competition", "Competition")
+SEASON_ALIASES = ("Season", "season", "Year", "year")
 
 
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -47,12 +54,26 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _ensure_keys(df: pd.DataFrame) -> pd.DataFrame:
-    """Guarantee 'team','league','season' exist as columns; map common team aliases."""
+    """Map common aliases -> KEYS and ensure keys exist as columns."""
+    # team
     if "team" not in df.columns:
         for alt in TEAM_ALIASES:
             if alt in df.columns:
                 df["team"] = df[alt]
                 break
+    # league
+    if "league" not in df.columns:
+        for alt in LEAGUE_ALIASES:
+            if alt in df.columns:
+                df["league"] = df[alt]
+                break
+    # season
+    if "season" not in df.columns:
+        for alt in SEASON_ALIASES:
+            if alt in df.columns:
+                df["season"] = df[alt]
+                break
+    # ensure all keys exist
     for k in KEYS:
         if k not in df.columns:
             df[k] = None
@@ -60,75 +81,62 @@ def _ensure_keys(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _drop_nonkey_allna(df: pd.DataFrame) -> pd.DataFrame:
-    """Drop only non-key columns that are entirely NaN; never drop KEYS."""
     to_drop = [c for c in df.columns if c not in KEYS and df[c].isna().all()]
-    if to_drop:
-        df = df.drop(columns=to_drop)
-    return df
+    return df.drop(columns=to_drop) if to_drop else df
 
 
-def _suffix_and_dedupe(df: pd.DataFrame, stat_type: str) -> pd.DataFrame:
-    """Suffix every non-key with _{stat_type} and enforce uniqueness."""
-    rename_map = {c: f"{c}_{stat_type}" for c in list(df.columns) if c not in KEYS}
+def _suffix_and_dedupe(df: pd.DataFrame, suffix: str) -> pd.DataFrame:
+    rename_map = {c: f"{c}_{suffix}" for c in df.columns if c not in KEYS}
     df = df.rename(columns=rename_map)
-
-    seen = set()
-    new_cols = []
+    seen, new_cols = set(), []
     for c in df.columns:
         nc = c
         while nc in seen:
             nc = f"{nc}_dup"
-        new_cols.append(nc)
-        seen.add(nc)
+        new_cols.append(nc); seen.add(nc)
     df.columns = new_cols
     return df
 
 
-def _clean_slice(df: pd.DataFrame, stat_type: str) -> pd.DataFrame:
-    """
-    Reset index (expose index levels as columns), normalize headers, ensure KEYS,
-    drop only non-key all-NaN columns, then suffix/dedupe non-keys.
-    """
+def _clean_slice(df: pd.DataFrame, suffix: str) -> pd.DataFrame:
+    """Reset index to columns, normalize, ensure KEYS, drop non-key all-NaN, suffix/dedupe."""
     if df is None or df.empty:
         return pd.DataFrame(columns=list(KEYS))
-
-    # Bring index levels out to columns
+    # bring any index levels out as columns
     df = df.reset_index()
     df = _normalize_columns(df)
     df = _ensure_keys(df)
-
-    # Drop only non-key all-NaN columns (do this AFTER ensuring keys!)
     df = _drop_nonkey_allna(df)
-
-    # If only keys remain, nothing useful to merge
     if not any(c for c in df.columns if c not in KEYS):
         return pd.DataFrame(columns=list(KEYS))
-
-    df = _suffix_and_dedupe(df, stat_type)
-
-    # Keys first
+    df = _suffix_and_dedupe(df, suffix)
+    # keys first
     key_cols = list(KEYS)
     other = [c for c in df.columns if c not in key_cols]
     return df[key_cols + other]
 
 
-def _read_slice(fb, stat_type: str) -> pd.DataFrame | None:
-    try:
-        raw = fb.read_team_season_stats(stat_type=stat_type)
-    except Exception as e:
-        print(f"[FBref] slice {stat_type} failed: {e}")
-        return None
-    if raw is None or raw.empty:
-        print(f"[FBref] slice {stat_type} is empty")
-        return None
-
-    df = _clean_slice(raw, stat_type)
-    if df.empty or df.drop(columns=list(KEYS)).shape[1] == 0:
-        print(f"[FBref] slice {stat_type} has no usable columns after cleaning")
-        return None
-
-    print(f"[FBref] slice {stat_type} shape={df.shape}")
-    return df
+def _try_stat_type(fb, canonical: str) -> pd.DataFrame | None:
+    """
+    Try all synonyms for a canonical slice until one works.
+    Return cleaned df or None if all fail.
+    """
+    for candidate in CANONICAL_SLICES[canonical]:
+        try:
+            raw = fb.read_team_season_stats(stat_type=candidate)
+        except Exception as e:
+            print(f"[FBref] {canonical} via '{candidate}' failed: {e}")
+            continue
+        if raw is None or raw.empty:
+            print(f"[FBref] {canonical} via '{candidate}' empty")
+            continue
+        df = _clean_slice(raw, canonical)  # suffix by canonical key for stability
+        if df is not None and not df.empty and df.drop(columns=list(KEYS)).shape[1] > 0:
+            print(f"[FBref] {canonical} resolved via '{candidate}', shape={df.shape}")
+            return df
+        else:
+            print(f"[FBref] {canonical} via '{candidate}' had no usable columns after cleaning")
+    return None
 
 
 def main():
@@ -141,13 +149,12 @@ def main():
             fb = sd.FBref(leagues=COMP, seasons=[SEASON])
 
             parts: list[pd.DataFrame] = []
-            for st in STAT_TYPES:
-                sl = _read_slice(fb, st)
+            for canonical in CANONICAL_ORDER:
+                sl = _try_stat_type(fb, canonical)
                 if sl is not None and not sl.empty:
                     parts.append(sl)
 
             if parts:
-                # incremental outer-merge to avoid large temp frames
                 merged = parts[0]
                 for sl in parts[1:]:
                     merged = pd.merge(merged, sl, on=list(KEYS), how="outer")
@@ -156,6 +163,7 @@ def main():
             err = e
             time.sleep(2)
 
+    # Fallbacks
     if merged is None or merged.empty:
         if os.path.exists(CACHE):
             merged = pd.read_csv(CACHE)
@@ -164,6 +172,7 @@ def main():
             pd.DataFrame(columns=list(KEYS)).to_csv(OUT, index=False)
             raise SystemExit(f"FBref fetch failed and no cache available: {err}")
 
+    # Keys first
     for k in KEYS:
         if k not in merged.columns:
             merged[k] = None
