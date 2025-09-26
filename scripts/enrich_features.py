@@ -91,7 +91,8 @@ def main():
     # --- Odds: bring over extra markets if already in fixtures ---
     if not fx.empty and "fixture_id" in fx.columns:
         # mark has_* flags when those columns are present
-        tmp = fx[["fixture_id"] + [c for c in ODDS_EXTRA_FIELDS if c in fx.columns]].copy()
+        cols = ["fixture_id"] + [c for c in ODDS_EXTRA_FIELDS if c in fx.columns]
+        tmp = fx[cols].copy() if len(cols) > 1 else pd.DataFrame()
         if not tmp.empty:
             up = up.merge(tmp, on="fixture_id", how="left", suffixes=("", "_od"))
             # set has_* based on presence of values
@@ -115,8 +116,6 @@ def main():
     # --- SPI (rank/conf intervals if present) ---
     spi = safe_read(SPI)
     if not spi.empty:
-        # naive join by team name; can be improved via team_name_map
-        # Create per-team rank mapping and attach as home/away columns
         if {"team","rank"}.issubset(set(spi.columns)):
             rank_map = dict(zip(spi["team"].astype(str), spi["rank"]))
             up["home_spi_rank"] = up["home_team"].astype(str).map(rank_map)
@@ -125,20 +124,21 @@ def main():
     # --- FBref multi-slice (schema-agnostic) ---
     fb = safe_read(FBREF)
     if not fb.empty and {"team","league","season"}.issubset(fb.columns):
-        # Build team-level columns with suffix, join twice (home/away)
-        # Prepare reduced set to avoid massive explosion; include all non-key cols
+        # Prepare reduced set to avoid explosion; include all non-key cols
         key_cols = {"team","league","season"}
         other_cols = [c for c in fb.columns if c not in key_cols]
         fb_red = fb[list(key_cols) + other_cols].copy()
+
         # Home join
         fb_home = fb_red.copy()
         fb_home.columns = [f"home_{c}" if c not in ("team","league","season") else c for c in fb_home.columns]
-        up = up.merge(fb_home, left_on=["home_team","league"], right_on=["team","league"], how="left", suffixes=("",""))
+        up = up.merge(fb_home, left_on=["home_team","league"], right_on=["team","league"], how="left")
         up.drop(columns=["team","season"], errors="ignore", inplace=True)
+
         # Away join
         fb_away = fb_red.copy()
         fb_away.columns = [f"away_{c}" if c not in ("team","league","season") else c for c in fb_away.columns]
-        up = up.merge(fb_away, left_on=["away_team","league"], right_on=["team","league"], how="left", suffixes=("",""))
+        up = up.merge(fb_away, left_on=["away_team","league"], right_on=["team","league"], how="left")
         up.drop(columns=["team","season"], errors="ignore", inplace=True)
 
     # --- Referee tendencies (optional) ---
