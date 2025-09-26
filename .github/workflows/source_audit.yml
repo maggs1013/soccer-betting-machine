@@ -1,0 +1,70 @@
+name: Source Audit (SBM)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "15 */6 * * *"   # every 6h
+
+permissions:
+  contents: read
+
+jobs:
+  source-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}   # set in repo secrets
+      STATS_BOMB_TOKEN: ${{ secrets.STATS_BOMB_TOKEN }} # if applicable
+      UNDERSTAT_EMAIL: ${{ secrets.UNDERSTAT_EMAIL }}   # if applicable
+      UNDERSTAT_PASSWORD: ${{ secrets.UNDERSTAT_PASSWORD }}
+      SOCCERDATA_CACHE: .cache/soccerdata          # local cache folder
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r audit/requirements.txt
+
+      - name: Prepare cache dirs
+        run: |
+          mkdir -p .cache/soccerdata
+          mkdir -p reports
+          mkdir -p data
+
+      - name: Probe sources (APIs, coverage, schemas)
+        run: |
+          python audit/odds_probe.py --key "${ODDS_API_KEY}" --out reports/odds_probe.json
+          python audit/soccerdata_probe.py --cache "${SOCCERDATA_CACHE}" --out reports/soccerdata_probe.json
+          python audit/spi_probe.py --out reports/spi_probe.json
+          python audit/understat_probe.py --out reports/understat_probe.json
+          python audit/statsbomb_probe.py --token "${STATS_BOMB_TOKEN}" --out reports/statsbomb_probe.json
+          python audit/fd_org_probe.py --out reports/football_data_probe.json
+
+      - name: Consolidate reports
+        run: |
+          python audit/audit_runner.py \
+            --odds reports/odds_probe.json \
+            --soccerdata reports/soccerdata_probe.json \
+            --spi reports/spi_probe.json \
+            --understat reports/understat_probe.json \
+            --statsbomb reports/statsbomb_probe.json \
+            --footballdata reports/football_data_probe.json \
+            --hist data/HIST_matches.csv \
+            --outdir reports
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-audit-reports
+          path: |
+            reports/*.json
+            reports/*.csv
