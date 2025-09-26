@@ -18,6 +18,16 @@ jobs:
     timeout-minutes: 120
     env:
       PYTHONUNBUFFERED: "1"
+      # Optional global halt (dry-run). Set in Actions → Variables if desired.
+      # RISK_HALT: "1"
+
+      # FBref config via repo Variables (these envs are read by the streamlined fetcher)
+      FBREF_LEAGUE: ${{ vars.FBREF_LEAGUE }}                # e.g., "ENG-Premier League"
+      FBREF_SEASONS: ${{ vars.FBREF_SEASONS }}              # e.g., "2022-2023,2023-2024,2024-2025"
+      FBREF_SLICES: ${{ vars.FBREF_SLICES }}                # e.g., "standard,shooting,passing,keepers,goal_shot_creation,misc"
+
+      # API-FOOTBALL league ids (optional; comma-separated) e.g., "39,140,135"
+      API_FOOTBALL_LEAGUE_IDS: ${{ vars.API_FOOTBALL_LEAGUE_IDS }}
 
     steps:
       - name: Checkout
@@ -40,7 +50,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .cache/soccerdata
-          key: ${{ runner.os }}-soccerdata-${{ env.FBREF_LEAGUE }}-${{ env.FBREF_SEASON }}
+          key: ${{ runner.os }}-soccerdata-${{ env.FBREF_LEAGUE }}-${{ env.FBREF_SEASONS }}
           restore-keys: |
             ${{ runner.os }}-soccerdata-
 
@@ -51,16 +61,12 @@ jobs:
           if [ -f "audit/requirements.txt" ]; then pip install -r audit/requirements.txt; fi
           mkdir -p data reports .cache/soccerdata
 
-      # ---- FETCHERS ----
+      # ---------------- FETCHERS ----------------
 
       - name: Fetch SPI (robust; ci_width)
         run: python connectors/spi_fetch.py
 
       - name: Fetch FBref slices → data/fbref_slice_*.csv (retry)
-        env:
-          FBREF_LEAGUE: ${{ vars.FBREF_LEAGUE }}
-          FBREF_SEASONS: ${{ vars.FBREF_SEASONS }}        # e.g. "2022-2023,2023-2024,2024-2025"
-          FBREF_SLICES: ${{ vars.FBREF_SLICES }}          # optional subset e.g. "standard,shooting,passing,keepers,goal_shot_creation,misc"
         run: |
           set -e
           for i in 1 2 3; do
@@ -79,7 +85,7 @@ jobs:
       - name: Attach API-FOOTBALL IDs to fixtures
         env:
           API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
-          API_FOOTBALL_LEAGUE_IDS: ${{ vars.API_FOOTBALL_LEAGUE_IDS }}
+          API_FOOTBALL_LEAGUE_IDS: ${{ env.API_FOOTBALL_LEAGUE_IDS }}
         run: python connectors/api_football_attach_ids.py
 
       - name: Fetch lineups (availability + experienced starters %)
@@ -87,7 +93,7 @@ jobs:
           API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
         run: python connectors/lineups_fetch.py
 
-      # ---- PRIORS + ENRICH ----
+      # --------------- PRIORS + ENRICH ---------------
 
       - name: Build cards/corners priors
         run: python scripts/ref_cards_corners_build.py
@@ -95,13 +101,16 @@ jobs:
       - name: Audit team/league mappings
         run: python scripts/mapping_audit.py
 
-      - name: Enrich features (reads per-slice FBref CSVs)
+      - name: Enrich features (per-slice FBref + line moves)
         run: python scripts/enrich_features.py
+
+      - name: Build schedule features (rest & density)
+        run: python scripts/hist_schedule_features.py
 
       - name: Build rolling form (exp-decay)
         run: python scripts/rolling_form_exp_decay.py
 
-      # ---- FEATURES + RISK ----
+      # --------------- FEATURES + RISK ---------------
 
       - name: Build feature diffs & coherence features
         run: python scripts/feature_patcher.py
@@ -109,10 +118,10 @@ jobs:
       - name: Build extended consistency checks
         run: python scripts/consistency_checks_build.py
 
-      - name: Update Kelly stakes by risk policy (with liquidity tiers)
+      - name: Update Kelly stakes by risk policy (liquidity tiers + caps)
         run: python scripts/kelly_policy_update.py
 
-      # ---- MODEL MATRIX ----
+      # --------------- MODEL MATRIX ---------------
 
       - name: Build model-ready matrix
         run: python scripts/model_matrix_build.py
@@ -123,7 +132,12 @@ jobs:
       - name: Build calibration report
         run: python scripts/calibration_report_build.py
 
-      # ---- BRIEFING ----
+      # --------------- OPTIONAL TRAINER ---------------
+      # This will no-op safely if data/TRAIN_MATRIX.csv is missing.
+      - name: Train minimal model (rolling CV + per-league isotonic)
+        run: python scripts/trainer_minimal.py
+
+      # --------------- BRIEFING / SLOs ---------------
 
       - name: Append source alerts to AUTO_BRIEFING.md
         run: |
@@ -140,9 +154,13 @@ jobs:
             else
               echo "- No ODDS_ALERTS.md found this run.";
             fi
+            echo "";
           } >> reports/AUTO_BRIEFING.md
 
-      # ---- ARTIFACTS ----
+      - name: Append SLOs to briefing
+        run: python scripts/preflight_slo_append.py
+
+      # --------------- ARTIFACTS ---------------
 
       - name: Upload data & reports
         uses: actions/upload-artifact@v4
