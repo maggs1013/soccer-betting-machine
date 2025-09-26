@@ -1,0 +1,67 @@
+name: SBM — Data Fetch & Preflight
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "5 */6 * * *"   # every 6 hours
+
+concurrency:
+  group: sbm-data-preflight
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  fetch-and-preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # If you keep a root requirements.txt (and the audit one), install both.
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f "requirements.txt" ]; then pip install -r requirements.txt; fi
+          if [ -f "audit/requirements.txt" ]; then pip install -r audit/requirements.txt; fi
+          # Safety: ensure dirs exist so writers don't fail
+          mkdir -p data reports
+
+      # ---- CONNECTOR CHECKS (your new scripts) ----
+
+      - name: Fetch SPI (robust)
+        run: python connectors/spi_fetch.py
+
+      - name: Fetch FBref team stats
+        run: python connectors/fbref_fetch.py
+
+      - name: Fetch Odds + Fixtures (resilient)
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+        run: python connectors/odds_fetch.py
+
+      # ---- ALERT APPEND (lives in scripts/) ----
+
+      - name: Append source alerts to AUTO_BRIEFING
+        run: python scripts/alerts_autobriefing_append.py
+
+      # Optional: surface the outputs for quick download / inspection
+      - name: Upload data & reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbm-preflight-artifacts
+          path: |
+            data/*.csv
+            reports/*.md
+            reports/*.csv
+            reports/*.json
