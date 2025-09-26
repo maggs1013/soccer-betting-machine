@@ -63,24 +63,19 @@ def main():
         alerts.append("❌ ODDS_API_KEY missing; using cache if present.")
         return use_cache_with_alerts(alerts)
 
-    # Sanity: can we hit the sports index?
     idx = http_get(f"{BASE}/sports", params={"apiKey": api_key})
     if not hasattr(idx, "status_code") or idx.status_code != 200:
         alerts.append(f"❌ Odds sports index failed: {getattr(idx,'status_code',None)} — using cache if present.")
         return use_cache_with_alerts(alerts)
 
-    # Pull events for target leagues
     rows = []
     total_events = 0
     leagues_counts = {}
 
     for lg in TARGET_LEAGUES:
         ev = http_get(f"{BASE}/sports/{lg}/odds", params={
-            "apiKey": api_key,
-            "regions": REGIONS,
-            "markets": MARKETS,
-            "oddsFormat": "decimal",
-            "dateFormat": "iso"
+            "apiKey": api_key, "regions": REGIONS, "markets": MARKETS,
+            "oddsFormat": "decimal", "dateFormat": "iso"
         }, tries=2)
         if not hasattr(ev, "status_code") or ev.status_code != 200:
             alerts.append(f"⚠️ {lg}: HTTP {getattr(ev,'status_code',None)}; skipping.")
@@ -96,13 +91,9 @@ def main():
                 continue
             home = (e.get("home_team") or "").strip()
             away = (e.get("away_team") or "").strip()
-
-            # bookmaker dispersion + opening/closing reach
             books = e.get("bookmakers", []) or []
             dispersion = len(books)
-            has_open = 0
-            has_close = 0
-
+            has_open = has_close = 0
             for b in books:
                 for mk in (b.get("markets") or []):
                     if mk.get("key") not in ("h2h","totals","btts","spreads"):
@@ -113,7 +104,6 @@ def main():
                         if h2k >= 48: has_open = 1
                         if h2k <= 3:  has_close = 1
 
-            # extract simple H2H odds if present (keep your schema)
             home_odds = draw_odds = away_odds = ""
             for b in books:
                 for mk in (b.get("markets") or []):
@@ -125,76 +115,54 @@ def main():
 
             rows.append({
                 "date": ko.isoformat(),
-                "home_team": home,
-                "away_team": away,
-                "home_odds_dec": home_odds,
-                "draw_odds_dec": draw_odds,
-                "away_odds_dec": away_odds,
-                "league": lg,
-                "bookmaker_count": dispersion,
-                "has_opening_odds": has_open,
-                "has_closing_odds": has_close
+                "home_team": home, "away_team": away,
+                "home_odds_dec": home_odds, "draw_odds_dec": draw_odds, "away_odds_dec": away_odds,
+                "league": lg, "bookmaker_count": dispersion,
+                "has_opening_odds": has_open, "has_closing_odds": has_close
             })
 
-    # Write results or fallback to cache
     if total_events == 0:
         alerts.append("❌ No odds events found across target leagues; using cache if present.")
         return use_cache_with_alerts(alerts)
 
-    # If very low coverage on Fri–Mon, warn but still write fresh file
-    dow = now.weekday()  # 0=Mon ... 6=Sun
+    dow = now.weekday()
     if dow in (4,5,6,0) and total_events < MIN_EVENTS_WEEKEND:
         alerts.append(f"⚠️ Low odds coverage on weekend window: {total_events} events.")
 
-    # Write CSV
-    with open(OUT_FIXTURES, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-        w.writeheader()
-        w.writerows(rows)
-
-    # Update cache
-    try:
-        with open(CACHE_FIXTURES, "w", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-            w.writeheader()
-            w.writerows(rows)
-    except Exception:
-        pass
+    write_csv(rows, OUT_FIXTURES)
+    try: write_csv(rows, CACHE_FIXTURES)
+    except Exception: pass
 
     save_alerts(alerts, total_events, leagues_counts)
-    print(f"Wrote {len(rows)} fixture rows to {OUT_FIXTURES}")
+    print(f"✅ Odds wrote {len(rows)} fixture rows → {OUT_FIXTURES}")
+
+def write_csv(rows, path):
+    import csv
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        w.writeheader(); w.writerows(rows)
 
 def use_cache_with_alerts(alerts: List[str]):
     if os.path.exists(CACHE_FIXTURES):
         alerts.append("ℹ️ Using cached fixtures: data/UPCOMING_fixtures.cache.csv")
         with open(CACHE_FIXTURES, "r", encoding="utf-8") as src, open(OUT_FIXTURES, "w", encoding="utf-8") as dst:
             dst.write(src.read())
-        save_alerts(alerts, -1, {})
-        print("Wrote cached fixtures to data/UPCOMING_fixtures.csv")
-        return
+        save_alerts(alerts, -1, {}); print("Wrote cached fixtures"); return
     alerts.append("🚫 No cache available; fixtures remain empty.")
     save_alerts(alerts, 0, {})
-    # Create empty file with header to avoid downstream crashes
-    with open(OUT_FIXTURES, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=[
-            "date","home_team","away_team","home_odds_dec","draw_odds_dec","away_odds_dec",
-            "league","bookmaker_count","has_opening_odds","has_closing_odds"
-        ])
-        w.writeheader()
+    with open(OUT_FIXTURES, "w", encoding="utf-8") as f:
+        f.write("date,home_team,away_team,home_odds_dec,draw_odds_dec,away_odds_dec,league,bookmaker_count,has_opening_odds,has_closing_odds\n")
 
 def save_alerts(alerts: List[str], total: int, leagues_counts: Dict[str,int]):
     os.makedirs(REPORTS_DIR, exist_ok=True)
     with open(ALERTS, "w", encoding="utf-8") as f:
         ts = datetime.utcnow().isoformat()
         f.write(f"# ODDS ALERTS — {ts} UTC\n\n")
-        for a in alerts:
-            f.write(f"- {a}\n")
-        if total is not None:
-            f.write(f"\n**Total events fetched:** {total}\n")
+        for a in alerts: f.write(f"- {a}\n")
+        if total is not None: f.write(f"\n**Total events fetched:** {total}\n")
         if leagues_counts:
             f.write("\n**Events by league:**\n")
-            for lg, n in sorted(leagues_counts.items()):
-                f.write(f"- {lg}: {n}\n")
+            for lg, n in sorted(leagues_counts.items()): f.write(f"- {lg}: {n}\n")
 
 if __name__ == "__main__":
     main()
