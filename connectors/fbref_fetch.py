@@ -1,61 +1,65 @@
 #!/usr/bin/env python3
 """
-FBref team stats via soccerdata (API 2025)
-- Uses read_team_season_stats with stat_type + seasons list
-- Fetches multiple stat_types (standard, shooting, passing, keeper)
-- Merges into one DataFrame keyed on [team, season, league]
-- Retries & writes last-good cache on success
-- Writes: data/sd_fbref_team_stats.csv
+FBref team stats via soccerdata (2025-safe)
+- Instantiate FBref with leagues + seasons
+- Call read_team_season_stats(stat_type=...)  (no seasons/competition kwargs here)
+- Pull multiple stat types and outer-merge on [team, league, season]
+- Cache last-good to data/sd_fbref_team_stats.cache.csv
+- Write live to data/sd_fbref_team_stats.csv
 """
 
 import os, time
 import pandas as pd
 
 DATA_DIR = "data"
-OUT = os.path.join(DATA_DIR, "sd_fbref_team_stats.csv")
+OUT   = os.path.join(DATA_DIR, "sd_fbref_team_stats.csv")
 CACHE = os.path.join(DATA_DIR, "sd_fbref_team_stats.cache.csv")
 
-COMP = "ENG-Premier League"
-SEASON = "2024-2025"   # single season; wrap in [SEASON] for API
+# You can change these or promote to env vars later.
+COMP   = os.environ.get("FBREF_LEAGUE", "ENG-Premier League")
+SEASON = os.environ.get("FBREF_SEASON", "2024-2025")
+STAT_TYPES = ["standard", "shooting", "passing", "keeper"]  # skip silently if one is unsupported
 
-STAT_TYPES = ["standard", "shooting", "passing", "keeper"]
-
-def fetch_stat_type(stat_type: str):
-    import soccerdata as sd
-    fb = sd.FBref()
-    df = fb.read_team_season_stats(
-        stat_type=stat_type,
-        competition=COMP,
-        seasons=[SEASON]
-    )
-    if df is None or df.empty:
+def fetch_stat_slice(fb, stat_type: str) -> pd.DataFrame | None:
+    """Fetch one stat_type slice and return normalized dataframe."""
+    try:
+        df = fb.read_team_season_stats(stat_type=stat_type)
+        if df is None or df.empty:
+            return None
+        # Ensure flat index
+        df = df.reset_index(drop=False)
+        # Normalize keys if present, else add
+        for k in ("team", "league", "season"):
+            if k not in df.columns:
+                df[k] = None
+        # Suffix non-key columns to avoid collisions
+        suffix = f"_{stat_type}"
+        keep_keys = {"team","league","season"}
+        df = df.rename(columns={c: f"{c}{suffix}" for c in df.columns if c not in keep_keys})
+        return df
+    except Exception:
         return None
-    # add suffix to columns to avoid clashes
-    suffix = f"_{stat_type}"
-    core_cols = ["team", "season", "league"]
-    df = df.reset_index(drop=False)
-    df = df.rename(columns={c: f"{c}{suffix}" for c in df.columns if c not in core_cols})
-    return df
 
 def main():
     os.makedirs(DATA_DIR, exist_ok=True)
-    tries = 2
-    err = None
-    merged = None
 
+    # NEW: pass leagues & seasons to constructor (API changed)
+    tries, err, merged = 3, None, None
     for _ in range(tries):
         try:
-            parts = []
+            import soccerdata as sd
+            fb = sd.FBref(leagues=COMP, seasons=[SEASON])  # <-- important
+            parts: list[pd.DataFrame] = []
             for st in STAT_TYPES:
-                print(f"Fetching FBref stat_type={st} …")
-                df = fetch_stat_type(st)
-                if df is not None:
-                    parts.append(df)
+                print(f"[FBref] fetching stat_type={st} …")
+                sl = fetch_stat_slice(fb, st)
+                if sl is not None:
+                    parts.append(sl)
+
             if parts:
-                # merge on keys
                 merged = parts[0]
-                for df in parts[1:]:
-                    merged = pd.merge(merged, df, on=["team","season","league"], how="outer")
+                for sl in parts[1:]:
+                    merged = pd.merge(merged, sl, on=["team","league","season"], how="outer")
             break
         except Exception as e:
             err = e
@@ -64,20 +68,18 @@ def main():
     if merged is None or merged.empty:
         if os.path.exists(CACHE):
             merged = pd.read_csv(CACHE)
-            print(f"⚠️ FBref fetch failed ({err}), using cache with {len(merged)} rows")
+            print(f"⚠️ FBref fetch failed ({err}); using cache with {len(merged)} rows")
         else:
-            # Write empty stub to keep pipeline alive
+            # minimal stub to keep pipeline alive
             pd.DataFrame(columns=["team","league","season"]).to_csv(OUT, index=False)
             raise SystemExit(f"FBref fetch failed and no cache available: {err}")
 
-    # Write outputs
     merged.to_csv(OUT, index=False)
     try:
         merged.to_csv(CACHE, index=False)
     except Exception:
         pass
-
-    print(f"✅ Wrote {len(merged)} rows to {OUT}")
+    print(f"✅ FBref wrote {len(merged)} rows → {OUT}")
 
 if __name__ == "__main__":
     main()
