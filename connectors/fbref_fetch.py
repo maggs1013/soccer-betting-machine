@@ -4,10 +4,11 @@ FBref team stats via soccerdata (2025-safe, multi-slice, duplicate-proof, index-
 
 - Instantiates FBref with leagues + seasons (API expects this at construction)
 - Pulls multiple stat_types and outer-merges them on [team, league, season]
-- Unconditionally resets slice index, normalizes headers, ensures KEYS exist (maps Squad/Team aliases)
-- Drops all-NaN columns from slices, suffixes ALL non-key columns per slice, guarantees uniqueness
-- Skips empty/useless slices, logs slice shapes, merges incrementally to reduce memory spikes
-- Falls back to cache if live fetch fails; writes minimal stub if no cache
+- Resets index to columns, normalizes headers, maps team aliases → 'team'
+- Ensures KEYS exist and NEVER drops them (drops only non-key all-NaN columns)
+- Suffixes ALL non-key columns per slice; guarantees uniqueness
+- Skips empty/useless slices, logs slice shapes, incremental merges
+- Falls back to cache; writes stub if no cache
 
 Outputs:
     data/sd_fbref_team_stats.csv
@@ -36,10 +37,7 @@ if ENV_SLICES.strip():
 else:
     STAT_TYPES = ["standard", "shooting", "passing", "keeper", "defense", "gca", "misc"]
 
-# Merge keys expected in every slice
 KEYS = ("team", "league", "season")
-
-# Common aliases soccerdata/FBref sometimes use for team
 TEAM_ALIASES = ("Squad", "squad", "Team", "team_name", "club", "Club")
 
 
@@ -49,22 +47,28 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _ensure_keys(df: pd.DataFrame) -> pd.DataFrame:
-    """Guarantee team/league/season exist as columns; map common aliases for team."""
-    # map team aliases first
+    """Guarantee 'team','league','season' exist as columns; map common team aliases."""
     if "team" not in df.columns:
         for alt in TEAM_ALIASES:
             if alt in df.columns:
                 df["team"] = df[alt]
                 break
-    # league/season may be absent in some slices; create placeholder if so
     for k in KEYS:
         if k not in df.columns:
             df[k] = None
     return df
 
 
+def _drop_nonkey_allna(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop only non-key columns that are entirely NaN; never drop KEYS."""
+    to_drop = [c for c in df.columns if c not in KEYS and df[c].isna().all()]
+    if to_drop:
+        df = df.drop(columns=to_drop)
+    return df
+
+
 def _suffix_and_dedupe(df: pd.DataFrame, stat_type: str) -> pd.DataFrame:
-    """Suffix every NON-KEY with _{stat_type} and enforce uniqueness."""
+    """Suffix every non-key with _{stat_type} and enforce uniqueness."""
     rename_map = {c: f"{c}_{stat_type}" for c in list(df.columns) if c not in KEYS}
     df = df.rename(columns=rename_map)
 
@@ -82,21 +86,21 @@ def _suffix_and_dedupe(df: pd.DataFrame, stat_type: str) -> pd.DataFrame:
 
 def _clean_slice(df: pd.DataFrame, stat_type: str) -> pd.DataFrame:
     """
-    Reset index (pull index levels to columns), normalize headers,
-    ensure KEYS, drop all-NaN columns, suffix/dedupe non-keys.
+    Reset index (expose index levels as columns), normalize headers, ensure KEYS,
+    drop only non-key all-NaN columns, then suffix/dedupe non-keys.
     """
     if df is None or df.empty:
         return pd.DataFrame(columns=list(KEYS))
 
-    # Always pull index levels into columns (do NOT drop)
+    # Bring index levels out to columns
     df = df.reset_index()
     df = _normalize_columns(df)
     df = _ensure_keys(df)
 
-    # Remove all-NaN columns (soccerdata sometimes emits placeholders)
-    df = df.dropna(axis=1, how="all")
+    # Drop only non-key all-NaN columns (do this AFTER ensuring keys!)
+    df = _drop_nonkey_allna(df)
 
-    # If only keys remain, nothing to use
+    # If only keys remain, nothing useful to merge
     if not any(c for c in df.columns if c not in KEYS):
         return pd.DataFrame(columns=list(KEYS))
 
@@ -114,7 +118,6 @@ def _read_slice(fb, stat_type: str) -> pd.DataFrame | None:
     except Exception as e:
         print(f"[FBref] slice {stat_type} failed: {e}")
         return None
-
     if raw is None or raw.empty:
         print(f"[FBref] slice {stat_type} is empty")
         return None
@@ -135,7 +138,6 @@ def main():
     for _ in range(tries):
         try:
             import soccerdata as sd
-            # API expects leagues & seasons on construction
             fb = sd.FBref(leagues=COMP, seasons=[SEASON])
 
             parts: list[pd.DataFrame] = []
@@ -145,7 +147,7 @@ def main():
                     parts.append(sl)
 
             if parts:
-                # Incremental outer-merge to keep memory in check
+                # incremental outer-merge to avoid large temp frames
                 merged = parts[0]
                 for sl in parts[1:]:
                     merged = pd.merge(merged, sl, on=list(KEYS), how="outer")
@@ -154,7 +156,6 @@ def main():
             err = e
             time.sleep(2)
 
-    # Fallbacks
     if merged is None or merged.empty:
         if os.path.exists(CACHE):
             merged = pd.read_csv(CACHE)
@@ -163,7 +164,6 @@ def main():
             pd.DataFrame(columns=list(KEYS)).to_csv(OUT, index=False)
             raise SystemExit(f"FBref fetch failed and no cache available: {err}")
 
-    # Final hygiene: keep KEYS present and first
     for k in KEYS:
         if k not in merged.columns:
             merged[k] = None
