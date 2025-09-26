@@ -3,7 +3,7 @@ name: SBM — Data Fetch & Preflight
 on:
   workflow_dispatch:
   schedule:
-    - cron: "5 */6 * * *"   # every 6 hours
+    - cron: "5 */6 * * *"
 
 concurrency:
   group: sbm-data-preflight
@@ -15,7 +15,7 @@ permissions:
 jobs:
   fetch-and-preflight:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     env:
       PYTHONUNBUFFERED: "1"
 
@@ -35,15 +35,14 @@ jobs:
           if [ -f "audit/requirements.txt" ]; then pip install -r audit/requirements.txt; fi
           mkdir -p data reports
 
-      # -------- FETCHERS (with fallbacks) --------
-
-      - name: Fetch SPI (robust; cached fallback)
+      # ---- FETCHERS ----
+      - name: Fetch SPI (robust; ci_width)
         run: python connectors/spi_fetch.py
 
       - name: Fetch FBref team stats (multi-slice; cached fallback)
         run: python connectors/fbref_fetch.py
 
-      - name: Fetch Odds + Fixtures (resilient, two-key fallback)
+      - name: Fetch Odds + Fixtures (H2H + OU + BTTS + Spreads; two-key fallback)
         env:
           THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
           THE_ODDS_API_KEY_BACKUP: ${{ secrets.THE_ODDS_API_KEY_BACKUP }}
@@ -51,25 +50,26 @@ jobs:
 
       - name: Attach API-FOOTBALL IDs to fixtures
         env:
-          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}                     # optional but recommended
-          API_FOOTBALL_LEAGUE_IDS: ${{ vars.API_FOOTBALL_LEAGUE_IDS }}          # optional CSV like: 39,140,135,...
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+          API_FOOTBALL_LEAGUE_IDS: ${{ vars.API_FOOTBALL_LEAGUE_IDS }}
         run: python connectors/api_football_attach_ids.py
 
-      - name: Fetch lineups (actual starters → availability/injury indices)
+      - name: Fetch lineups (availability + experienced starters %)
         env:
-          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}                     # optional; script is safe if absent
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
         run: python connectors/lineups_fetch.py
 
-      # -------- AUDIT + ENRICH --------
-
+      # ---- AUDIT + ENRICH ----
       - name: Audit team/league mappings
         run: python scripts/mapping_audit.py
 
-      - name: Enrich features (safe + schema-agnostic)
+      - name: Enrich features
         run: python scripts/enrich_features.py
 
-      # -------- NEW: FEATURE DIFFS, CONSISTENCY, KELLY, MODEL MATRIX --------
+      - name: Build rolling form (last5/last10)
+        run: python scripts/rolling_form_build.py
 
+      # ---- FEATURES + RISK ----
       - name: Build feature diffs & coherence features
         run: python scripts/feature_patcher.py
 
@@ -79,11 +79,14 @@ jobs:
       - name: Update Kelly stakes by risk policy
         run: python scripts/kelly_policy_update.py
 
+      # ---- MODEL MATRIX ----
       - name: Build model-ready matrix
         run: python scripts/model_matrix_build.py
 
-      # -------- BRIEFING / ALERTS --------
+      - name: Validate model matrix schema
+        run: python scripts/model_matrix_validate.py
 
+      # ---- BRIEFING ----
       - name: Append source alerts to AUTO_BRIEFING.md
         run: |
           mkdir -p reports
@@ -101,8 +104,7 @@ jobs:
             fi
           } >> reports/AUTO_BRIEFING.md
 
-      # -------- ARTIFACTS --------
-
+      # ---- ARTIFACTS ----
       - name: Upload data & reports
         uses: actions/upload-artifact@v4
         with:
