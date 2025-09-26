@@ -56,10 +56,11 @@ jobs:
       - name: Fetch SPI (robust; ci_width)
         run: python connectors/spi_fetch.py
 
-      # Streamlined FBref: fetch -> save per-slice CSVs (retry for transient cancels)
       - name: Fetch FBref slices → data/fbref_slice_*.csv (retry)
         env:
-          FBREF_SLICES: ${{ vars.FBREF_SLICES }}  # optional, e.g. "standard,shooting,passing,keepers,goal_shot_creation,misc"
+          FBREF_LEAGUE: ${{ vars.FBREF_LEAGUE }}
+          FBREF_SEASONS: ${{ vars.FBREF_SEASONS }}        # e.g. "2022-2023,2023-2024,2024-2025"
+          FBREF_SLICES: ${{ vars.FBREF_SLICES }}          # optional subset e.g. "standard,shooting,passing,keepers,goal_shot_creation,misc"
         run: |
           set -e
           for i in 1 2 3; do
@@ -97,8 +98,8 @@ jobs:
       - name: Enrich features (reads per-slice FBref CSVs)
         run: python scripts/enrich_features.py
 
-      - name: Build rolling form (last5/last10)
-        run: python scripts/rolling_form_build.py
+      - name: Build rolling form (exp-decay)
+        run: python scripts/rolling_form_exp_decay.py
 
       # ---- FEATURES + RISK ----
 
@@ -108,7 +109,7 @@ jobs:
       - name: Build extended consistency checks
         run: python scripts/consistency_checks_build.py
 
-      - name: Update Kelly stakes by risk policy
+      - name: Update Kelly stakes by risk policy (with liquidity tiers)
         run: python scripts/kelly_policy_update.py
 
       # ---- MODEL MATRIX ----
@@ -118,6 +119,9 @@ jobs:
 
       - name: Validate model matrix schema
         run: python scripts/model_matrix_validate.py
+
+      - name: Build calibration report
+        run: python scripts/calibration_report_build.py
 
       # ---- BRIEFING ----
 
