@@ -2,7 +2,6 @@
 """
 FBref team stats via soccerdata (2025-safe)
 - Instantiate FBref with leagues + seasons
-- Call read_team_season_stats(stat_type=...)  (no seasons/competition kwargs here)
 - Pull multiple stat types and outer-merge on [team, league, season]
 - Cache last-good to data/sd_fbref_team_stats.cache.csv
 - Write live to data/sd_fbref_team_stats.csv
@@ -17,7 +16,7 @@ CACHE = os.path.join(DATA_DIR, "sd_fbref_team_stats.cache.csv")
 
 COMP   = os.environ.get("FBREF_LEAGUE", "ENG-Premier League")
 SEASON = os.environ.get("FBREF_SEASON", "2024-2025")
-STAT_TYPES = ["standard", "shooting", "passing", "keeper"]  # skip silently if unsupported
+STAT_TYPES = ["standard", "shooting", "passing", "keeper"]  # add/remove as you like
 
 def fetch_stat_slice(fb, stat_type: str) -> pd.DataFrame | None:
     try:
