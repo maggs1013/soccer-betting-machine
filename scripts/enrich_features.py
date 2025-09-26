@@ -1,21 +1,12 @@
 #!/usr/bin/env python3
 """
-enrich_features.py  —  robust enrichment pass
-
-Purpose
--------
-Add contextual enrichments (injuries/lineups, referee, stadium/crowd, travel)
-to the upcoming fixtures table, without ever failing when inputs are missing.
-
-Inputs (data/):
-  UPCOMING_7D_enriched.csv      ← produced by 01_enrich_fixtures/build_upcoming_window
-  lineups.csv                   ← optional, manual overrides (injuries/absences)
-  referee_tendencies.csv        ← optional, per-ref penalties/cards
-  stadium_crowd.csv             ← optional, crowd indices per home venue
-  travel_matrix.csv             ← optional, precomputed distances (home vs away)
-
-Outputs (data/):
-  UPCOMING_7D_enriched.csv      ← same file, updated in-place with safe defaults
+enrich_features.py — robust enrichment pass (REPLACEMENT)
+- Safe with missing inputs; always writes a valid UPCOMING_7D_enriched.csv
+- Adds odds (OU/BTTS/spreads) when present in fixtures
+- Adds FBref multi-slice columns if present
+- Adds SPI rank/extra fields if present
+- Adds lineups/injury/availability from provider connector (not manual)
+- Preserves referee, crowd, travel enrichments
 """
 
 import os
@@ -24,17 +15,31 @@ import pandas as pd
 
 DATA = "data"
 UP_PATH   = os.path.join(DATA, "UPCOMING_7D_enriched.csv")
-LINEUPS   = os.path.join(DATA, "lineups.csv")
-REFS      = os.path.join(DATA, "referee_tendencies.csv")
-STADIUM   = os.path.join(DATA, "stadium_crowd.csv")
-TRAVEL    = os.path.join(DATA, "travel_matrix.csv")
+FIX_PATH  = os.path.join(DATA, "UPCOMING_fixtures.csv")
+LINEUPS   = os.path.join(DATA, "lineups.csv")                 # produced by connectors/lineups_fetch.py
+REFS      = os.path.join(DATA, "referee_tendencies.csv")      # optional
+STADIUM   = os.path.join(DATA, "stadium_crowd.csv")           # optional
+TRAVEL    = os.path.join(DATA, "travel_matrix.csv")           # optional
+FBREF     = os.path.join(DATA, "sd_fbref_team_stats.csv")     # multi-slice merged file
+SPI       = os.path.join(DATA, "sd_538_spi.csv")              # robust parser output
 
 SAFE_DEFAULTS = {
     "home_injury_index": 0.30, "away_injury_index": 0.30,
     "ref_pen_rate": 0.30,
     "crowd_index": 0.70,
     "home_travel_km": 0.0, "away_travel_km": 200.0,
+    # Odds-related defaults (H2H already in fixtures)
+    "has_ou": 0, "has_btts": 0, "has_spread": 0,
 }
+
+# Flexible column guards for optional enrichments
+ODDS_EXTRA_FIELDS = [
+    # Add more as you begin storing them in UPCOMING_fixtures.csv
+    "ou_main_total", "ou_over_price", "ou_under_price",
+    "btts_yes_price", "btts_no_price",
+    "spread_home_line", "spread_home_price", "spread_away_line", "spread_away_price",
+    "bookmaker_count", "has_opening_odds", "has_closing_odds"
+]
 
 def safe_read(path, cols=None):
     if not os.path.exists(path):
@@ -55,42 +60,91 @@ def ensure_cols(df, col_defaults: dict):
             df[c] = v
     return df
 
+def normalize_fixture_id(row):
+    d = str(row.get("date","NA")).replace("-","").replace("T","_").replace(":","")
+    h = str(row.get("home_team","NA")).strip().lower().replace(" ","_")
+    a = str(row.get("away_team","NA")).strip().lower().replace(" ","_")
+    return f"{d}__{h}__vs__{a}"
+
 def main():
-    if not os.path.exists(UP_PATH):
-        print(f"[WARN] {UP_PATH} missing; writing header-only shell.")
+    # Start from the last enriched file if present; otherwise begin from fixtures
+    up = safe_read(UP_PATH)
+    fx = safe_read(FIX_PATH)
+    if fx.empty and up.empty:
+        # write minimal shell so pipeline never breaks
         pd.DataFrame(columns=["date","league","fixture_id","home_team","away_team"]).to_csv(UP_PATH, index=False)
+        print("[WARN] No fixtures/enriched input; wrote header-only")
         return
 
-    up = pd.read_csv(UP_PATH)
+    # If no enriched table yet, clone fixtures skeleton
+    if up.empty and not fx.empty:
+        up = fx.copy()
+    # Ensure keys exist
     if "league" not in up.columns:
         up["league"] = "GLOBAL"
     if "fixture_id" not in up.columns:
-        # mirror 01_enrich_fixtures generation if needed
-        up["fixture_id"] = up.apply(
-            lambda r: f"{str(r.get('date','NA')).replace('-','')}__{str(r.get('home_team','NA')).strip().lower().replace(' ','_')}__vs__{str(r.get('away_team','NA')).strip().lower().replace(' ','_')}",
-            axis=1
-        )
+        up["fixture_id"] = up.apply(normalize_fixture_id, axis=1)
 
-    # Defaults so downstream never breaks
+    # Safe defaults
     up = ensure_cols(up, SAFE_DEFAULTS)
 
-    # --- Lineups / injuries (optional) ---
-    # Expect columns: fixture_id, home_injury_index, away_injury_index (0..1)
-    ln = safe_read(LINEUPS, ["fixture_id","home_injury_index","away_injury_index"])
+    # --- Odds: bring over extra markets if already in fixtures ---
+    if not fx.empty and "fixture_id" in fx.columns:
+        # mark has_* flags when those columns are present
+        tmp = fx[["fixture_id"] + [c for c in ODDS_EXTRA_FIELDS if c in fx.columns]].copy()
+        if not tmp.empty:
+            up = up.merge(tmp, on="fixture_id", how="left", suffixes=("", "_od"))
+            # set has_* based on presence of values
+            if "ou_over_price" in up.columns or "ou_under_price" in up.columns:
+                up["has_ou"] = 1
+            if "btts_yes_price" in up.columns or "btts_no_price" in up.columns:
+                up["has_btts"] = 1
+            if "spread_home_line" in up.columns or "spread_away_line" in up.columns:
+                up["has_spread"] = 1
+
+    # --- Lineups / injuries / availability (provider) ---
+    ln = safe_read(LINEUPS, ["fixture_id","home_injury_index","away_injury_index","home_avail","away_avail"])
     if not ln.empty and "fixture_id" in ln.columns:
         ln = ln.drop_duplicates("fixture_id")
-        up = up.merge(ln, on="fixture_id", how="left", suffixes=("", "_from_lineup"))
-        for c in ["home_injury_index","away_injury_index"]:
-            if f"{c}_from_lineup" in up.columns:
-                up[c] = np.where(up[f"{c}_from_lineup"].notna(), up[f"{c}_from_lineup"], up[c])
-                up.drop(columns=[f"{c}_from_lineup"], inplace=True, errors="ignore")
+        up = up.merge(ln, on="fixture_id", how="left", suffixes=("", "_ln"))
+        for c in ["home_injury_index","away_injury_index","home_avail","away_avail"]:
+            if f"{c}_ln" in up.columns:
+                up[c] = np.where(up[f"{c}_ln"].notna(), up[f"{c}_ln"], up.get(c, np.nan))
+                up.drop(columns=[f"{c}_ln"], inplace=True, errors="ignore")
+
+    # --- SPI (rank/conf intervals if present) ---
+    spi = safe_read(SPI)
+    if not spi.empty:
+        # naive join by team name; can be improved via team_name_map
+        # Create per-team rank mapping and attach as home/away columns
+        if {"team","rank"}.issubset(set(spi.columns)):
+            rank_map = dict(zip(spi["team"].astype(str), spi["rank"]))
+            up["home_spi_rank"] = up["home_team"].astype(str).map(rank_map)
+            up["away_spi_rank"] = up["away_team"].astype(str).map(rank_map)
+
+    # --- FBref multi-slice (schema-agnostic) ---
+    fb = safe_read(FBREF)
+    if not fb.empty and {"team","league","season"}.issubset(fb.columns):
+        # Build team-level columns with suffix, join twice (home/away)
+        # Prepare reduced set to avoid massive explosion; include all non-key cols
+        key_cols = {"team","league","season"}
+        other_cols = [c for c in fb.columns if c not in key_cols]
+        fb_red = fb[list(key_cols) + other_cols].copy()
+        # Home join
+        fb_home = fb_red.copy()
+        fb_home.columns = [f"home_{c}" if c not in ("team","league","season") else c for c in fb_home.columns]
+        up = up.merge(fb_home, left_on=["home_team","league"], right_on=["team","league"], how="left", suffixes=("",""))
+        up.drop(columns=["team","season"], errors="ignore", inplace=True)
+        # Away join
+        fb_away = fb_red.copy()
+        fb_away.columns = [f"away_{c}" if c not in ("team","league","season") else c for c in fb_away.columns]
+        up = up.merge(fb_away, left_on=["away_team","league"], right_on=["team","league"], how="left", suffixes=("",""))
+        up.drop(columns=["team","season"], errors="ignore", inplace=True)
 
     # --- Referee tendencies (optional) ---
-    # Expect columns: fixture_id or referee_name; we prioritize fixture_id
     rf = safe_read(REFS)
     if not rf.empty:
         if "fixture_id" in rf.columns:
-            # direct join
             keep = ["fixture_id"]
             if "ref_pen_rate" in rf.columns: keep.append("ref_pen_rate")
             up = up.merge(rf[keep].drop_duplicates("fixture_id"), on="fixture_id", how="left", suffixes=("", "_rf"))
@@ -99,29 +153,24 @@ def main():
                 up.drop(columns=["ref_pen_rate_rf"], inplace=True, errors="ignore")
 
     # --- Stadium crowd (optional) ---
-    # Expect columns: home_team, crowd_index (0..1) or venue + mapping
     sc = safe_read(STADIUM)
-    if not sc.empty:
-        # try to join on home_team
-        if "home_team" in up.columns and "home_team" in sc.columns and "crowd_index" in sc.columns:
-            sc_ht = sc[["home_team","crowd_index"]].drop_duplicates("home_team")
-            up = up.merge(sc_ht, on="home_team", how="left", suffixes=("", "_st"))
-            if "crowd_index_st" in up.columns:
-                up["crowd_index"] = np.where(up["crowd_index_st"].notna(), up["crowd_index_st"], up["crowd_index"])
-                up.drop(columns=["crowd_index_st"], inplace=True, errors="ignore")
+    if not sc.empty and {"home_team","crowd_index"}.issubset(sc.columns) and "home_team" in up.columns:
+        sc_ht = sc[["home_team","crowd_index"]].drop_duplicates("home_team")
+        up = up.merge(sc_ht, on="home_team", how="left", suffixes=("", "_st"))
+        if "crowd_index_st" in up.columns:
+            up["crowd_index"] = np.where(up["crowd_index_st"].notna(), up["crowd_index_st"], up["crowd_index"])
+            up.drop(columns=["crowd_index_st"], inplace=True, errors="ignore")
 
     # --- Travel distances (optional) ---
-    # Expect columns: home_team, away_team, travel_km_home, travel_km_away
     tv = safe_read(TRAVEL)
     if not tv.empty:
         cols = {c.lower(): c for c in tv.columns}
-        hh = cols.get("home_team", "home_team") if "home_team" in cols or "home_team" in tv.columns else None
-        aa = cols.get("away_team", "away_team") if "away_team" in cols or "away_team" in tv.columns else None
-        th = cols.get("travel_km_home") or cols.get("home_travel_km") or None
-        ta = cols.get("travel_km_away") or cols.get("away_travel_km") or None
-        if hh and aa and th and ta:
-            keep = [hh, aa, th, ta]
-            t2 = tv[keep].drop_duplicates([hh, aa]).rename(columns={
+        hh = cols.get("home_team") or "home_team"
+        aa = cols.get("away_team") or "away_team"
+        th = cols.get("travel_km_home") or cols.get("home_travel_km")
+        ta = cols.get("travel_km_away") or cols.get("away_travel_km")
+        if all([hh in tv.columns, aa in tv.columns, th in tv.columns, ta in tv.columns]):
+            t2 = tv[[hh, aa, th, ta]].drop_duplicates([hh, aa]).rename(columns={
                 hh:"home_team", aa:"away_team", th:"home_travel_km", ta:"away_travel_km"
             })
             up = up.merge(t2, on=["home_team","away_team"], how="left", suffixes=("", "_tv"))
