@@ -31,13 +31,12 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # Install root requirements if present
           if [ -f "requirements.txt" ]; then pip install -r requirements.txt; fi
-          # Install audit requirements (pins soccerdata from GitHub)
           if [ -f "audit/requirements.txt" ]; then pip install -r audit/requirements.txt; fi
           mkdir -p data reports
 
-      # ---- CONNECTOR FETCHERS ----
+      # -------- FETCHERS (with fallbacks) --------
+
       - name: Fetch SPI (robust; cached fallback)
         run: python connectors/spi_fetch.py
 
@@ -53,7 +52,7 @@ jobs:
       - name: Attach API-FOOTBALL IDs to fixtures
         env:
           API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}                     # optional but recommended
-          API_FOOTBALL_LEAGUE_IDS: ${{ vars.API_FOOTBALL_LEAGUE_IDS }}          # optional (comma-separated ids)
+          API_FOOTBALL_LEAGUE_IDS: ${{ vars.API_FOOTBALL_LEAGUE_IDS }}          # optional CSV like: 39,140,135,...
         run: python connectors/api_football_attach_ids.py
 
       - name: Fetch lineups (actual starters → availability/injury indices)
@@ -61,14 +60,30 @@ jobs:
           API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}                     # optional; script is safe if absent
         run: python connectors/lineups_fetch.py
 
-      # ---- AUDIT + ENRICH ----
+      # -------- AUDIT + ENRICH --------
+
       - name: Audit team/league mappings
         run: python scripts/mapping_audit.py
 
       - name: Enrich features (safe + schema-agnostic)
         run: python scripts/enrich_features.py
 
-      # ---- APPEND SOURCE ALERTS TO BRIEFING ----
+      # -------- NEW: FEATURE DIFFS, CONSISTENCY, KELLY, MODEL MATRIX --------
+
+      - name: Build feature diffs & coherence features
+        run: python scripts/feature_patcher.py
+
+      - name: Build extended consistency checks
+        run: python scripts/consistency_checks_build.py
+
+      - name: Update Kelly stakes by risk policy
+        run: python scripts/kelly_policy_update.py
+
+      - name: Build model-ready matrix
+        run: python scripts/model_matrix_build.py
+
+      # -------- BRIEFING / ALERTS --------
+
       - name: Append source alerts to AUTO_BRIEFING.md
         run: |
           mkdir -p reports
@@ -86,7 +101,8 @@ jobs:
             fi
           } >> reports/AUTO_BRIEFING.md
 
-      # ---- PUBLISH ARTIFACTS ----
+      # -------- ARTIFACTS --------
+
       - name: Upload data & reports
         uses: actions/upload-artifact@v4
         with:
