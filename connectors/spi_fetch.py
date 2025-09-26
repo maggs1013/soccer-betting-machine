@@ -1,62 +1,52 @@
 #!/usr/bin/env python3
 """
-Robust FiveThirtyEight SPI fetcher
-- Handles CSV format drift by falling back to python engine and on_bad_lines='skip'
+Robust FiveThirtyEight SPI fetcher (handles format drift)
+- Tries fast pandas reader, then python engine with on_bad_lines='skip'
 - Caches snapshot for fallback
-- Writes: data/sd_538_spi.csv
+- Output: data/sd_538_spi.csv (+ .cache.csv)
 """
 
 import os, io, requests
 import pandas as pd
 
 DATA_DIR = "data"
-OUT = os.path.join(DATA_DIR, "sd_538_spi.csv")
+OUT   = os.path.join(DATA_DIR, "sd_538_spi.csv")
 CACHE = os.path.join(DATA_DIR, "sd_538_spi.cache.csv")
-URL = "https://projects.fivethirtyeight.com/soccer-api/club/spi_global_rankings2.csv"
+URL   = "https://projects.fivethirtyeight.com/soccer-api/club/spi_global_rankings2.csv"
 
-def read_spi() -> pd.DataFrame:
-    r = requests.get(URL, timeout=30)
-    r.raise_for_status()
-    text = r.text
-    # 1) fast path
+def read_spi_df() -> pd.DataFrame:
+    resp = requests.get(URL, timeout=30)
+    resp.raise_for_status()
+    txt = resp.text
     try:
-        return pd.read_csv(io.StringIO(text))
+        return pd.read_csv(io.StringIO(txt))
     except Exception:
-        # 2) python engine, skip bad lines
-        return pd.read_csv(io.StringIO(text), engine="python", on_bad_lines="skip")
+        return pd.read_csv(io.StringIO(txt), engine="python", on_bad_lines="skip")
 
 def main():
     os.makedirs(DATA_DIR, exist_ok=True)
     df = None
-    err = None
-    for _ in range(2):
-        try:
-            df = read_spi()
-            break
-        except Exception as e:
-            err = e
-
-    if df is None or df.empty:
+    try:
+        df = read_spi_df()
+    except Exception as e:
         if os.path.exists(CACHE):
             df = pd.read_csv(CACHE)
+            print(f"⚠️ SPI fetch failed ({e}); using cache {len(df)} rows")
         else:
-            raise SystemExit(f"SPI fetch failed and no cache available: {err}")
+            raise SystemExit(f"SPI fetch failed and no cache available: {e}")
 
-    # keep only columns we actually use + a few useful extras
-    keep = [c for c in df.columns if c.lower() in {
-        "team","league","spi","spi_off","spi_def","rank","off","def","global_team_id","date"
-    }]
-    if not keep:
-        # fallback to all columns if names drifted
-        keep = list(df.columns)
-    df = df[keep]
+    # keep commonly used columns if present
+    wanted = {"team","league","spi","spi_off","spi_def","rank","off","def","global_team_id","date"}
+    keep = [c for c in df.columns if c.lower() in wanted]
+    if keep:
+        df = df[keep]
 
     df.to_csv(OUT, index=False)
     try:
         df.to_csv(CACHE, index=False)
     except Exception:
         pass
-    print(f"Wrote {len(df)} rows to {OUT}")
+    print(f"✅ SPI wrote {len(df)} rows → {OUT}")
 
 if __name__ == "__main__":
     main()
