@@ -3,7 +3,7 @@ name: SBM — Data Fetch & Preflight
 on:
   workflow_dispatch:
   schedule:
-    - cron: "5 */6 * * *"   # every 6 hours
+    - cron: "5 */6 * * *"
 
 concurrency:
   group: sbm-data-preflight
@@ -15,7 +15,7 @@ permissions:
 jobs:
   fetch-and-preflight:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     env:
       PYTHONUNBUFFERED: "1"
 
@@ -31,44 +31,47 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # Install root requirements if present
           if [ -f "requirements.txt" ]; then pip install -r requirements.txt; fi
-          # Install audit/requirements (includes soccerdata from GitHub)
           if [ -f "audit/requirements.txt" ]; then pip install -r audit/requirements.txt; fi
           mkdir -p data reports
 
-      # ---- CONNECTOR CHECKS ----
-      - name: Fetch SPI (robust; cached fallback)
+      - name: Fetch SPI (robust)
         run: python connectors/spi_fetch.py
 
-      - name: Fetch FBref team stats (multi-slice; cached fallback)
+      - name: Fetch FBref team stats (multi-slice)
         run: python connectors/fbref_fetch.py
 
-      - name: Fetch Odds + Fixtures (resilient, two-key fallback)
+      - name: Fetch Odds + Fixtures (two-key + normalized markets)
         env:
           THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
           THE_ODDS_API_KEY_BACKUP: ${{ secrets.THE_ODDS_API_KEY_BACKUP }}
         run: python connectors/multi_odds_fetch.py
 
-      # ---- APPEND SOURCE ALERTS TO BRIEFING ----
+      - name: Fetch Lineups (API-FOOTBALL)
+        env:
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+        run: python connectors/lineups_fetch.py
+
+      - name: Alias audit (unmapped names)
+        run: python scripts/alias_audit.py
+
+      - name: Enrich upcoming fixtures (features for modeling)
+        run: python scripts/enrich_features.py
+
       - name: Append source alerts to AUTO_BRIEFING.md
         run: |
-          # Ensure briefing exists so the appender can append
           mkdir -p reports
           if [ ! -f reports/AUTO_BRIEFING.md ]; then echo "# AUTO BRIEFING" > reports/AUTO_BRIEFING.md; fi
           python scripts/alerts_autobriefing_append.py
           echo "" >> reports/AUTO_BRIEFING.md
-          echo "## Odds Key Usage" >> reports/AUTO_BRIEFING.md
-          # Surface which odds key was used (the connector writes to ODDS_ALERTS.md)
+          echo "## Odds Key Usage (from ODDS_ALERTS.md)" >> reports/AUTO_BRIEFING.md
           if [ -f reports/ODDS_ALERTS.md ]; then
             echo "" >> reports/AUTO_BRIEFING.md
-            echo "**From ODDS_ALERTS.md:**" >> reports/AUTO_BRIEFING.md
             tail -n +1 reports/ODDS_ALERTS.md >> reports/AUTO_BRIEFING.md
           else
             echo "- No ODDS_ALERTS.md found this run." >> reports/AUTO_BRIEFING.md
           fi
 
-      # ---- PUBLISH ARTIFACTS ----
       - name: Upload data & reports
         uses: actions/upload-artifact@v4
         with:
