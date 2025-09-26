@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
 """
-enrich_features.py — robust enrichment pass (FINAL, per-slice FBref ingestion)
+enrich_features.py — robust enrichment pass (FINAL, per-slice FBref ingestion + line moves)
 
-Adds:
-- Odds extras (OU/BTTS/spreads) when present in fixtures
+Adds (safe/optional where data exists):
+- Odds extras (OU/BTTS/spreads) + line moves if opening/closing are present
 - SPI rank & spi_ci_width (home/away)
 - Lineups: availability, injury indices, experienced starters %
 - Team/ref seasonal priors (cards, corners)
-- FBref per-slice metrics:
-  • passing → pass%            → home_pass_pct / away_pass_pct
-  • keepers → PSxG prevented   → home_gk_psxg_prevented / away_gk_psxg_prevented
+- FBref per-slice metrics (regex-picked, schema-agnostic):
+  • passing → pass%                     → home_pass_pct / away_pass_pct
+  • keepers → PSxG prevented            → home_gk_psxg_prevented / away_gk_psxg_prevented
   • goal_shot_creation → SCA/90 & GCA/90
-  • defense → pressures/90 & tackles/90 (heuristic column names)
-  • possession → set-piece creation proxy (set pieces per 90 or share)
+  • defense → pressures/90 & tackles/90
+  • possession → set-piece share proxy
+  • press-to-shot conversion → home_press_to_sca / away_press_to_sca
 - Stadium crowd, travel distances
 - Never crashes if inputs are missing; writes valid enriched CSV
 
-Outputs:
+Output:
   data/UPCOMING_7D_enriched.csv
 """
 
@@ -62,7 +63,12 @@ ODDS_EXTRA_FIELDS = [
     "ou_main_total", "ou_over_price", "ou_under_price",
     "btts_yes_price", "btts_no_price",
     "spread_home_line", "spread_home_price", "spread_away_line", "spread_away_price",
-    "bookmaker_count", "has_opening_odds", "has_closing_odds"
+    "bookmaker_count", "has_opening_odds", "has_closing_odds",
+
+    # optional opening/closing snapshots (only computed if present)
+    "open_ou_total","close_ou_total",
+    "open_home_odds","close_home_odds","open_away_odds","close_away_odds","open_draw_odds","close_draw_odds",
+    "open_spread_home_line","close_spread_home_line","open_spread_away_line","close_spread_away_line"
 ]
 
 def safe_read(path, cols=None):
@@ -147,7 +153,7 @@ def main():
 
     up = ensure_cols(up, SAFE_DEFAULTS)
 
-    # --- Odds extras ---
+    # --- Odds extras & line moves (safe if opening/closing exist) ---
     if not fx.empty and "fixture_id" in fx.columns:
         cols = ["fixture_id"] + [c for c in ODDS_EXTRA_FIELDS if c in fx.columns]
         tmp = fx[cols].copy() if len(cols) > 1 else pd.DataFrame()
@@ -156,6 +162,20 @@ def main():
             if "ou_over_price" in up.columns or "ou_under_price" in up.columns: up["has_ou"] = 1
             if "btts_yes_price" in up.columns or "btts_no_price" in up.columns: up["has_btts"] = 1
             if "spread_home_line" in up.columns or "spread_away_line" in up.columns: up["has_spread"] = 1
+
+            # Line moves
+            if "open_ou_total" in up.columns and "close_ou_total" in up.columns:
+                up["ou_move"] = num(up["close_ou_total"]) - num(up["open_ou_total"])
+
+            for side in ["home","away","draw"]:
+                op = f"open_{side}_odds"; cl = f"close_{side}_odds"; mv = f"h2h_{side}_move"
+                if op in up.columns and cl in up.columns:
+                    up[mv] = num(up[cl]) - num(up[op])
+
+            if "open_spread_home_line" in up.columns and "close_spread_home_line" in up.columns:
+                up["spread_home_line_move"] = num(up["close_spread_home_line"]) - num(up["open_spread_home_line"])
+            if "open_spread_away_line" in up.columns and "close_spread_away_line" in up.columns:
+                up["spread_away_line_move"] = num(up["close_spread_away_line"]) - num(up["open_spread_away_line"])
 
     # --- Lineups: injuries/availability + experienced starters pct ---
     ln = safe_read(LINEUPS, ["fixture_id","home_injury_index","away_injury_index",
@@ -180,7 +200,7 @@ def main():
             up["home_spi_ci_width"] = up["home_team"].astype(str).map(wmap)
             up["away_spi_ci_width"] = up["away_team"].astype(str).map(wmap)
 
-    # --- FBref per-slice features (read per-slice consolidated CSVs) ---
+    # --- FBref per-slice features (read consolidated per-slice CSVs) ---
     # Passing → pass%
     passing = safe_read(FBREF_SLICE["passing"])
     up = merge_slice_feature(up, passing, "home_pass_pct", "away_pass_pct",
@@ -205,7 +225,7 @@ def main():
     up = merge_slice_feature(up, defense, "home_tackles90", "away_tackles90",
                              feature_patterns=[r"tackles.*90|tackles/90|tkls/90|tkls.*90"])
 
-    # Possession → set-piece creation proxy (e.g., set pieces/90 or share)
+    # Possession → set-piece creation proxy
     possession = safe_read(FBREF_SLICE["possession"])
     up = merge_slice_feature(up, possession, "home_setpiece_share", "away_setpiece_share",
                              feature_patterns=[r"set[- ]?piece(s)?(_share)?|set[- ]?pieces?/90|sp\%|set_?piece_?(share|pct|%)"])
@@ -214,6 +234,11 @@ def main():
     misc = safe_read(FBREF_SLICE["misc"])
     up = merge_slice_feature(up, misc, "home_cards_per_match", "away_cards_per_match",
                              feature_patterns=[r"cards_?per_?match|Cards/Match|cards/90|crds/90"])
+
+    # Press-to-shot conversion (if both pressures90 & sca90 present)
+    if {"home_pressures90","away_pressures90","home_sca90","away_sca90"}.issubset(up.columns):
+        up["home_press_to_sca"] = num(up["home_sca90"]) / (num(up["home_pressures90"]) + 1e-9)
+        up["away_press_to_sca"] = num(up["away_sca90"]) / (num(up["away_pressures90"]) + 1e-9)
 
     # --- Cards & corners priors (team/referee) ---
     rcc = safe_read(RCC)
