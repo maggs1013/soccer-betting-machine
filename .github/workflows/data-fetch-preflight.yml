@@ -21,7 +21,7 @@ jobs:
       # Optional global halt (dry-run). Set in Actions → Variables if desired.
       # RISK_HALT: "1"
 
-      # FBref config via repo Variables (these envs are read by the streamlined fetcher)
+      # FBref config via repo Variables (read by the streamlined fetcher)
       FBREF_LEAGUE: ${{ vars.FBREF_LEAGUE }}                # e.g., "ENG-Premier League"
       FBREF_SEASONS: ${{ vars.FBREF_SEASONS }}              # e.g., "2022-2023,2023-2024,2024-2025"
       FBREF_SLICES: ${{ vars.FBREF_SLICES }}                # e.g., "standard,shooting,passing,keepers,goal_shot_creation,misc"
@@ -138,6 +138,9 @@ jobs:
       - name: Update Kelly stakes by risk policy (liquidity tiers + caps)
         run: python scripts/kelly_policy_update.py
 
+      - name: Log vetoed fixtures (WHY_NOT_BET)
+        run: python scripts/why_not_bet.py
+
       # --------------- MODEL MATRIX ---------------
 
       - name: Build model-ready matrix
@@ -156,6 +159,9 @@ jobs:
 
       - name: Train stack (base + priors + contradictions)
         run: python scripts/stack_trainer.py
+
+      - name: Build feature-importance report
+        run: python scripts/feature_importance_report.py
 
       # --------------- BRIEFING / SLOs ---------------
 
