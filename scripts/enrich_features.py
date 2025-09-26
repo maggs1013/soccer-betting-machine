@@ -2,10 +2,11 @@
 """
 enrich_features.py — robust enrichment pass (FINAL)
 - Safe with missing inputs; always writes a valid UPCOMING_7D_enriched.csv
-- Adds odds (OU/BTTS/spreads) when present in fixtures
-- Adds FBref multi-slice columns if present
-- Adds SPI rank and spi_ci_width (home/away) if present
+- Adds odds (H2H already in fixtures) + OU/BTTS/spreads when present
+- Adds FBref multi-slice columns (schema-agnostic)
+- Adds SPI rank and spi_ci_width (mapped to home/away)
 - Adds lineups/injury/availability + experienced starters pct (provider)
+- Adds seasonal cards/corners priors (team & referee) from Football-Data.org
 - Preserves referee, crowd, travel enrichments
 """
 
@@ -16,19 +17,19 @@ import pandas as pd
 DATA = "data"
 UP_PATH   = os.path.join(DATA, "UPCOMING_7D_enriched.csv")
 FIX_PATH  = os.path.join(DATA, "UPCOMING_fixtures.csv")
-LINEUPS   = os.path.join(DATA, "lineups.csv")                 # produced by connectors/lineups_fetch.py
+LINEUPS   = os.path.join(DATA, "lineups.csv")
 REFS      = os.path.join(DATA, "referee_tendencies.csv")      # optional
 STADIUM   = os.path.join(DATA, "stadium_crowd.csv")           # optional
 TRAVEL    = os.path.join(DATA, "travel_matrix.csv")           # optional
-FBREF     = os.path.join(DATA, "sd_fbref_team_stats.csv")     # multi-slice merged file
-SPI       = os.path.join(DATA, "sd_538_spi.csv")              # robust parser output
+FBREF     = os.path.join(DATA, "sd_fbref_team_stats.csv")
+SPI       = os.path.join(DATA, "sd_538_spi.csv")
+RCC       = os.path.join(DATA, "ref_cards_corners.csv")       # NEW (cards/corners priors)
 
 SAFE_DEFAULTS = {
     "home_injury_index": 0.30, "away_injury_index": 0.30,
     "ref_pen_rate": 0.30,
     "crowd_index": 0.70,
     "home_travel_km": 0.0, "away_travel_km": 200.0,
-    # Odds-related defaults (H2H already in fixtures)
     "has_ou": 0, "has_btts": 0, "has_spread": 0,
 }
 
@@ -88,15 +89,13 @@ def main():
         tmp = fx[cols].copy() if len(cols) > 1 else pd.DataFrame()
         if not tmp.empty:
             up = up.merge(tmp, on="fixture_id", how="left", suffixes=("", "_od"))
-            if "ou_over_price" in up.columns or "ou_under_price" in up.columns:
-                up["has_ou"] = 1
-            if "btts_yes_price" in up.columns or "btts_no_price" in up.columns:
-                up["has_btts"] = 1
-            if "spread_home_line" in up.columns or "spread_away_line" in up.columns:
-                up["has_spread"] = 1
+            if "ou_over_price" in up.columns or "ou_under_price" in up.columns: up["has_ou"] = 1
+            if "btts_yes_price" in up.columns or "btts_no_price" in up.columns: up["has_btts"] = 1
+            if "spread_home_line" in up.columns or "spread_away_line" in up.columns: up["has_spread"] = 1
 
     # --- Lineups: injuries/availability + experienced starters pct ---
-    ln = safe_read(LINEUPS, ["fixture_id","home_injury_index","away_injury_index","home_avail","away_avail","home_exp_starters_pct","away_exp_starters_pct"])
+    ln = safe_read(LINEUPS, ["fixture_id","home_injury_index","away_injury_index",
+                             "home_avail","away_avail","home_exp_starters_pct","away_exp_starters_pct"])
     if not ln.empty and "fixture_id" in ln.columns:
         ln = ln.drop_duplicates("fixture_id")
         up = up.merge(ln, on="fixture_id", how="left", suffixes=("", "_ln"))
@@ -107,18 +106,15 @@ def main():
 
     # --- SPI: rank + ci_width (map to home/away if present) ---
     spi = safe_read(SPI)
-    if not spi.empty:
-        if "team" in spi.columns:
-            # rank
-            if "rank" in spi.columns:
-                rank_map = dict(zip(spi["team"].astype(str), spi["rank"]))
-                up["home_spi_rank"] = up["home_team"].astype(str).map(rank_map)
-                up["away_spi_rank"] = up["away_team"].astype(str).map(rank_map)
-            # ci width
-            if "spi_ci_width" in spi.columns:
-                wmap = dict(zip(spi["team"].astype(str), spi["spi_ci_width"]))
-                up["home_spi_ci_width"] = up["home_team"].astype(str).map(wmap)
-                up["away_spi_ci_width"] = up["away_team"].astype(str).map(wmap)
+    if not spi.empty and "team" in spi.columns:
+        if "rank" in spi.columns:
+            rank_map = dict(zip(spi["team"].astype(str), spi["rank"]))
+            up["home_spi_rank"] = up["home_team"].astype(str).map(rank_map)
+            up["away_spi_rank"] = up["away_team"].astype(str).map(rank_map)
+        if "spi_ci_width" in spi.columns:
+            wmap = dict(zip(spi["team"].astype(str), spi["spi_ci_width"]))
+            up["home_spi_ci_width"] = up["home_team"].astype(str).map(wmap)
+            up["away_spi_ci_width"] = up["away_team"].astype(str).map(wmap)
 
     # --- FBref multi-slice join (schema-agnostic) ---
     fb = safe_read(FBREF)
@@ -137,7 +133,23 @@ def main():
         up = up.merge(fb_away, left_on=["away_team","league"], right_on=["team","league"], how="left")
         up.drop(columns=["team","season"], errors="ignore", inplace=True)
 
-    # --- Referee (optional) ---
+    # --- Cards & corners priors (NEW; optional) ---
+    rcc = safe_read(RCC)
+    if not rcc.empty and {"league","team","season"}.issubset(rcc.columns):
+        # Team-level priors → join twice
+        for side in ["home","away"]:
+            sub = rcc.rename(columns={"team":f"{side}_team"})
+            keep = [f"{side}_team","league","season","avg_cards","avg_corners"]
+            keep = [k for k in keep if k in sub.columns]
+            if len(keep) >= 4:
+                up = up.merge(sub[keep], on=[f"{side}_team","league"], how="left")
+                up.rename(columns={"avg_cards":f"{side}_avg_cards","avg_corners":f"{side}_avg_corners"}, inplace=True)
+        # Referee prior if 'referee' exists in both tables
+        if "referee" in up.columns and "referee" in rcc.columns and "ref_avg_cards" in rcc.columns:
+            up = up.merge(rcc[["referee","ref_avg_cards"]].drop_duplicates("referee"),
+                          on="referee", how="left")
+
+    # --- Referee tendencies (legacy optional) ---
     rf = safe_read(REFS)
     if not rf.empty and "fixture_id" in rf.columns:
         keep = ["fixture_id"]
