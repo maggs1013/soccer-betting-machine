@@ -15,7 +15,7 @@ permissions:
 jobs:
   fetch-and-preflight:
     runs-on: ubuntu-latest
-    timeout-minutes: 120   # more headroom for provider hiccups
+    timeout-minutes: 120
     env:
       PYTHONUNBUFFERED: "1"
 
@@ -56,7 +56,7 @@ jobs:
       - name: Fetch SPI (robust; ci_width)
         run: python connectors/spi_fetch.py
 
-      # STREAMLINED FBREF: fetch & save each slice (retry if runner hiccups)
+      # Streamlined FBref: fetch -> save per-slice CSVs (retry for transient cancels)
       - name: Fetch FBref slices → data/fbref_slice_*.csv (retry)
         env:
           FBREF_SLICES: ${{ vars.FBREF_SLICES }}  # optional, e.g. "standard,shooting,passing,keepers,goal_shot_creation,misc"
@@ -68,10 +68,6 @@ jobs:
             echo "FBref slice fetch attempt $i failed; sleeping before retry..."
             sleep $((15 * i))
           done
-
-      # Merge the saved slices into sd_fbref_team_stats.csv (lightweight)
-      - name: Merge FBref slices → sd_fbref_team_stats.csv
-        run: python scripts/fbref_merge_slices.py
 
       - name: Fetch Odds + Fixtures (H2H + OU + BTTS + Spreads; two-key fallback)
         env:
@@ -98,7 +94,7 @@ jobs:
       - name: Audit team/league mappings
         run: python scripts/mapping_audit.py
 
-      - name: Enrich features
+      - name: Enrich features (reads per-slice FBref CSVs)
         run: python scripts/enrich_features.py
 
       - name: Build rolling form (last5/last10)
