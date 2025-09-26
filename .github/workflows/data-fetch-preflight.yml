@@ -32,9 +32,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           if [ -f "requirements.txt" ]; then pip install -r requirements.txt; fi
-          # audit requirements (includes soccerdata from GitHub)
+          # If you keep audit requirements (includes soccerdata from GitHub)
           if [ -f "audit/requirements.txt" ]; then pip install -r audit/requirements.txt; fi
           mkdir -p data reports
+
+      # --- Connectors (delete/replace files per our last messages) ---
 
       - name: Fetch SPI (robust)
         run: python connectors/spi_fetch.py
@@ -42,12 +44,10 @@ jobs:
       - name: Fetch FBref team stats
         run: python connectors/fbref_fetch.py
 
-      - name: Fetch Odds + Fixtures (multi-provider, resilient)
+      - name: Fetch Odds + Fixtures (multi-key: primary then backup)
         env:
-          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}             # The Odds API
-          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}     # api-football.com key (not RapidAPI)
-          # Optional: restrict leagues by provider IDs (comma-separated, see file for defaults)
-          API_FOOTBALL_LEAGUE_IDS: ${{ vars.API_FOOTBALL_LEAGUE_IDS }}
+          THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}                 # primary
+          THE_ODDS_API_KEY_BACKUP: ${{ secrets.THE_ODDS_API_KEY_BACKUP }}   # backup
         run: python connectors/multi_odds_fetch.py
 
       - name: Append source alerts to AUTO_BRIEFING
