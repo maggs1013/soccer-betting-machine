@@ -2,13 +2,22 @@
 """
 enrich_features.py — robust enrichment pass (FINAL, per-slice FBref ingestion)
 
-- Safe with missing inputs; always writes a valid UPCOMING_7D_enriched.csv
-- Adds odds extras (OU/BTTS/spreads) when present in fixtures
-- Adds SPI rank and spi_ci_width (home/away)
-- Adds lineups/injury/availability + experienced starters pct (provider)
-- Adds seasonal cards/corners priors (team & referee) from Football-Data.org
-- Adds FBref per-slice metrics by reading data/fbref_slice_<slice>.csv
-- Preserves referee, crowd, travel enrichments
+Adds:
+- Odds extras (OU/BTTS/spreads) when present in fixtures
+- SPI rank & spi_ci_width (home/away)
+- Lineups: availability, injury indices, experienced starters %
+- Team/ref seasonal priors (cards, corners)
+- FBref per-slice metrics:
+  • passing → pass%            → home_pass_pct / away_pass_pct
+  • keepers → PSxG prevented   → home_gk_psxg_prevented / away_gk_psxg_prevented
+  • goal_shot_creation → SCA/90 & GCA/90
+  • defense → pressures/90 & tackles/90 (heuristic column names)
+  • possession → set-piece creation proxy (set pieces per 90 or share)
+- Stadium crowd, travel distances
+- Never crashes if inputs are missing; writes valid enriched CSV
+
+Outputs:
+  data/UPCOMING_7D_enriched.csv
 """
 
 import os
@@ -26,7 +35,7 @@ TRAVEL    = os.path.join(DATA, "travel_matrix.csv")           # optional
 SPI       = os.path.join(DATA, "sd_538_spi.csv")
 RCC       = os.path.join(DATA, "ref_cards_corners.csv")       # team/ref priors
 
-# FBref per-slice CSVs produced by connectors/fbref_fetch_streamlined.py
+# FBref per-slice CSVs (consolidated) produced by connectors/fbref_fetch_streamlined.py
 FBREF_SLICE = {
     "standard":            os.path.join(DATA, "fbref_slice_standard.csv"),
     "shooting":            os.path.join(DATA, "fbref_slice_shooting.csv"),
@@ -98,7 +107,7 @@ def merge_slice_feature(up, slice_df, home_name, away_name, feature_patterns):
     Map a single numeric column from a slice onto home/away columns.
     feature_patterns: list of regexes to match column in slice_df
     """
-    if slice_df.empty: 
+    if slice_df.empty:
         up[home_name] = np.nan; up[away_name] = np.nan
         return up
 
@@ -149,7 +158,8 @@ def main():
             if "spread_home_line" in up.columns or "spread_away_line" in up.columns: up["has_spread"] = 1
 
     # --- Lineups: injuries/availability + experienced starters pct ---
-    ln = safe_read(LINEUPS, ["fixture_id","home_injury_index","away_injury_index","home_avail","away_avail","home_exp_starters_pct","away_exp_starters_pct"])
+    ln = safe_read(LINEUPS, ["fixture_id","home_injury_index","away_injury_index",
+                             "home_avail","away_avail","home_exp_starters_pct","away_exp_starters_pct"])
     if not ln.empty and "fixture_id" in ln.columns:
         ln = ln.drop_duplicates("fixture_id")
         up = up.merge(ln, on="fixture_id", how="left", suffixes=("", "_ln"))
@@ -170,28 +180,40 @@ def main():
             up["home_spi_ci_width"] = up["home_team"].astype(str).map(wmap)
             up["away_spi_ci_width"] = up["away_team"].astype(str).map(wmap)
 
-    # --- FBref per-slice features (read directly from slice CSVs) ---
-    # Passing: try completion % column
+    # --- FBref per-slice features (read per-slice consolidated CSVs) ---
+    # Passing → pass%
     passing = safe_read(FBREF_SLICE["passing"])
     up = merge_slice_feature(up, passing, "home_pass_pct", "away_pass_pct",
                              feature_patterns=[r"Cmp%|Pass%|Cmp_perc|passing.*(pct|%)"])
 
-    # Keepers: try PSxG prevented (or similar)
+    # Keepers → PSxG prevented (or similar)
     keepers = safe_read(FBREF_SLICE["keepers"])
     up = merge_slice_feature(up, keepers, "home_gk_psxg_prevented", "away_gk_psxg_prevented",
-                             feature_patterns=[r"PSxG[+|-]G|psxg.*prevent|gk.*prevent|psxg_minus_ga"])
+                             feature_patterns=[r"PSxG[+|-]G|psxg.*prevent|gk.*prevent|psxg_minus_ga|psxg\+\/-"])
 
-    # GCA/SCA: goal/shot creation actions per 90 (if present)
+    # GCA/SCA per 90
     gca = safe_read(FBREF_SLICE["goal_shot_creation"])
     up = merge_slice_feature(up, gca, "home_sca90", "away_sca90",
-                             feature_patterns=[r"\bSCA/90\b|sca.*90"])
+                             feature_patterns=[r"\bSCA/90\b|sca.*90|sca90"])
     up = merge_slice_feature(up, gca, "home_gca90", "away_gca90",
-                             feature_patterns=[r"\bGCA/90\b|gca.*90"])
+                             feature_patterns=[r"\bGCA/90\b|gca.*90|gca90"])
 
-    # Defense/Misc: cards per match (fallback if priors missing)
+    # Defense → pressures/90 & tackles/90
+    defense = safe_read(FBREF_SLICE["defense"])
+    up = merge_slice_feature(up, defense, "home_pressures90", "away_pressures90",
+                             feature_patterns=[r"pressures.*90|pressures/90|pr(ess)?/90"])
+    up = merge_slice_feature(up, defense, "home_tackles90", "away_tackles90",
+                             feature_patterns=[r"tackles.*90|tackles/90|tkls/90|tkls.*90"])
+
+    # Possession → set-piece creation proxy (e.g., set pieces/90 or share)
+    possession = safe_read(FBREF_SLICE["possession"])
+    up = merge_slice_feature(up, possession, "home_setpiece_share", "away_setpiece_share",
+                             feature_patterns=[r"set[- ]?piece(s)?(_share)?|set[- ]?pieces?/90|sp\%|set_?piece_?(share|pct|%)"])
+
+    # Misc → fallback cards per match
     misc = safe_read(FBREF_SLICE["misc"])
     up = merge_slice_feature(up, misc, "home_cards_per_match", "away_cards_per_match",
-                             feature_patterns=[r"cards_per_?match|Cards/Match|cards/90"])
+                             feature_patterns=[r"cards_?per_?match|Cards/Match|cards/90|crds/90"])
 
     # --- Cards & corners priors (team/referee) ---
     rcc = safe_read(RCC)
