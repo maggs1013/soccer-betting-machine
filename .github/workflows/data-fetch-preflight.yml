@@ -10,7 +10,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write   # <-- write needed only if you enable the optional auto-commit step below
+  contents: write   # needed only if you enable the optional auto-commit of HISTORY_LOG.csv
 
 jobs:
   fetch-and-preflight:
@@ -21,7 +21,7 @@ jobs:
       # Optional global halt (dry-run) for staking:
       # RISK_HALT: "1"
 
-      # FBref config (read by the streamlined fetcher)
+      # FBref config via repo Variables (read by the streamlined fetcher)
       FBREF_LEAGUE: ${{ vars.FBREF_LEAGUE }}                # e.g., "ENG-Premier League"
       FBREF_SEASONS: ${{ vars.FBREF_SEASONS }}              # e.g., "2022-2023,2023-2024,2024-2025"
       FBREF_SLICES: ${{ vars.FBREF_SLICES }}                # e.g., "standard,shooting,passing,keepers,goal_shot_creation,misc"
@@ -144,7 +144,7 @@ jobs:
       - name: WHY_NOT_BET summary (grouped reasons)
         run: python scripts/why_not_bet_summary.py
 
-      # --------------- HISTORY LOGGER (NEW) ---------------
+      # --------------- HISTORY LOGGER ---------------
 
       - name: Append history log (run-time audit)
         env:
@@ -181,7 +181,7 @@ jobs:
           BLANK_FAIL_CRITICAL: "0"   # set to "1" to hard-fail on critical blanks
         run: python scripts/blank_file_guard.py
 
-      # --------------- BRIEFING / SLOs / SANITY ---------------
+      # --------------- BRIEFING / SLOs / SANITY / FORWARD LOOK ---------------
 
       - name: Append source alerts to AUTO_BRIEFING.md
         run: |
@@ -207,6 +207,9 @@ jobs:
       - name: Post-run sanity summary
         run: python scripts/post_run_sanity.py
 
+      - name: Forward coverage & gaps
+        run: python scripts/forward_coverage_report.py
+
       # --------------- OPTIONAL: COMMIT HISTORY TO REPO ---------------
       # - name: Commit updated HISTORY_LOG.csv to repo
       #   if: always()
@@ -218,7 +221,6 @@ jobs:
       #     git push
 
       # --------------- ARTIFACTS ---------------
-
       - name: Upload data & reports
         uses: actions/upload-artifact@v4
         with:
@@ -228,4 +230,4 @@ jobs:
             reports/*.md
             reports/*.csv
             reports/*.json
-          # retention-days: 90   # uncomment to override artifact retention (if allowed by org policy)
+          # retention-days: 90
