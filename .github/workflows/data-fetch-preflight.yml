@@ -193,6 +193,9 @@ jobs:
       - name: Append SLOs to briefing
         run: python scripts/preflight_slo_append.py
 
+      - name: Post-run sanity summary
+        run: python scripts/post_run_sanity.py
+
       # --------------- ARTIFACTS ---------------
 
       - name: Upload data & reports
