@@ -163,6 +163,13 @@ jobs:
       - name: Build feature-importance report
         run: python scripts/feature_importance_report.py
 
+      # --------------- BLANK FILE GUARD ---------------
+
+      - name: Guard against blank artifacts
+        env:
+          BLANK_FAIL_CRITICAL: "0"   # set to "1" to hard-fail on critical blanks
+        run: python scripts/blank_file_guard.py
+
       # --------------- BRIEFING / SLOs ---------------
 
       - name: Append source alerts to AUTO_BRIEFING.md
