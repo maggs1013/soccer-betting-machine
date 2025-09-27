@@ -10,7 +10,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: read
+  contents: write   # <-- write needed only if you enable the optional auto-commit step below
 
 jobs:
   fetch-and-preflight:
@@ -21,7 +21,7 @@ jobs:
       # Optional global halt (dry-run) for staking:
       # RISK_HALT: "1"
 
-      # FBref config via repo Variables (read by the streamlined fetcher)
+      # FBref config (read by the streamlined fetcher)
       FBREF_LEAGUE: ${{ vars.FBREF_LEAGUE }}                # e.g., "ENG-Premier League"
       FBREF_SEASONS: ${{ vars.FBREF_SEASONS }}              # e.g., "2022-2023,2023-2024,2024-2025"
       FBREF_SLICES: ${{ vars.FBREF_SLICES }}                # e.g., "standard,shooting,passing,keepers,goal_shot_creation,misc"
@@ -144,6 +144,14 @@ jobs:
       - name: WHY_NOT_BET summary (grouped reasons)
         run: python scripts/why_not_bet_summary.py
 
+      # --------------- HISTORY LOGGER (NEW) ---------------
+
+      - name: Append history log (run-time audit)
+        env:
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_WORKFLOW: ${{ github.workflow }}
+        run: python scripts/history_logger.py
+
       # --------------- MODEL MATRIX ---------------
 
       - name: Build model-ready matrix
@@ -199,6 +207,16 @@ jobs:
       - name: Post-run sanity summary
         run: python scripts/post_run_sanity.py
 
+      # --------------- OPTIONAL: COMMIT HISTORY TO REPO ---------------
+      # - name: Commit updated HISTORY_LOG.csv to repo
+      #   if: always()
+      #   run: |
+      #     git config user.name "github-actions"
+      #     git config user.email "actions@github.com"
+      #     git add data/HISTORY_LOG.csv
+      #     git commit -m "Append HISTORY_LOG.csv [CI] (run ${{ github.run_id }})" || echo "No changes to commit."
+      #     git push
+
       # --------------- ARTIFACTS ---------------
 
       - name: Upload data & reports
@@ -210,3 +228,4 @@ jobs:
             reports/*.md
             reports/*.csv
             reports/*.json
+          # retention-days: 90   # uncomment to override artifact retention (if allowed by org policy)
