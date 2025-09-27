@@ -28,11 +28,14 @@ jobs:
           if [ -f "requirements.txt" ]; then pip install -r requirements.txt; fi
           mkdir -p data reports
 
-      - name: Run monthly replay backtest
+      - name: Run monthly replay backtest (training-based)
         run: python scripts/backtest_replay.py
 
-      - name: Append model vs market charts
+      - name: Append model vs market charts (prob/odds bins)
         run: python scripts/replay_charts_append.py
+
+      - name: Replay from runtime history (what we knew at run-time)
+        run: python scripts/backtest_replay_from_history.py
 
       - name: Upload replay artifacts
         uses: actions/upload-artifact@v4
@@ -42,3 +45,6 @@ jobs:
             data/BACKTEST_BY_WEEK.csv
             data/BACKTEST_SUMMARY.csv
             reports/REPLAY_REPORT.md
+            data/BACKTEST_FROM_HISTORY_BY_WEEK.csv
+            data/BACKTEST_FROM_HISTORY_SUMMARY.csv
+            reports/REPLAY_FROM_HISTORY.md
