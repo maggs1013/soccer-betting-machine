@@ -18,7 +18,7 @@ jobs:
     timeout-minutes: 120
     env:
       PYTHONUNBUFFERED: "1"
-      # Optional global halt (dry-run). Set in Actions → Variables if desired.
+      # Optional global halt (dry-run) for staking:
       # RISK_HALT: "1"
 
       # FBref config via repo Variables (read by the streamlined fetcher)
@@ -141,6 +141,9 @@ jobs:
       - name: Log vetoed fixtures (WHY_NOT_BET)
         run: python scripts/why_not_bet.py
 
+      - name: WHY_NOT_BET summary (grouped reasons)
+        run: python scripts/why_not_bet_summary.py
+
       # --------------- MODEL MATRIX ---------------
 
       - name: Build model-ready matrix
@@ -170,12 +173,12 @@ jobs:
           BLANK_FAIL_CRITICAL: "0"   # set to "1" to hard-fail on critical blanks
         run: python scripts/blank_file_guard.py
 
-      # --------------- BRIEFING / SLOs ---------------
+      # --------------- BRIEFING / SLOs / SANITY ---------------
 
       - name: Append source alerts to AUTO_BRIEFING.md
         run: |
           mkdir -p reports
-          if [ ! -f reports/AUTO_BRIEFING.md ]; then echo "# AUTO BRIEFING" > reports/AUTO_BRIEFING.md; fi
+          if [ ! -f reports/AUTO_BRIEFING.md ] ; then echo "# AUTO BRIEFING" > reports/AUTO_BRIEFING.md ; fi
           python scripts/alerts_autobriefing_append.py
           {
             echo "";
