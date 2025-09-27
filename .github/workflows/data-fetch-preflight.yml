@@ -210,6 +210,14 @@ jobs:
       - name: Forward coverage & gaps
         run: python scripts/forward_coverage_report.py
 
+      # --------------- DEEP PROBE + COUNCIL DECK ---------------
+
+      - name: Deep sanity probe (file-by-file)
+        run: python scripts/deep_sanity_probe.py
+
+      - name: Build Council Deck (one-glance review)
+        run: python scripts/council_deck_build.py
+
       # --------------- OPTIONAL: COMMIT HISTORY TO REPO ---------------
       # - name: Commit updated HISTORY_LOG.csv to repo
       #   if: always()
@@ -221,6 +229,7 @@ jobs:
       #     git push
 
       # --------------- ARTIFACTS ---------------
+
       - name: Upload data & reports
         uses: actions/upload-artifact@v4
         with:
