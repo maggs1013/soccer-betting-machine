@@ -82,11 +82,28 @@ jobs:
           THE_ODDS_API_KEY_BACKUP: ${{ secrets.THE_ODDS_API_KEY_BACKUP }}
         run: python connectors/multi_odds_fetch.py
 
+      # ---------- FIXTURES RELIABILITY LAYER ----------
+
+      - name: Ensure fixtures exist (API-FOOTBALL fallback)
+        env:
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+          API_FOOTBALL_LEAGUE_IDS: ${{ env.API_FOOTBALL_LEAGUE_IDS }}
+        run: python connectors/fixtures_fallback_api_football.py
+
+      - name: Persist opening/closing odds & line-moves
+        run: python connectors/odds_open_close_capture.py
+
+      - name: Fixtures debug probe
+        run: python scripts/fixtures_debug_probe.py
+
       - name: Attach API-FOOTBALL IDs to fixtures
         env:
           API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
           API_FOOTBALL_LEAGUE_IDS: ${{ env.API_FOOTBALL_LEAGUE_IDS }}
         run: python connectors/api_football_attach_ids.py
+
+      - name: League allowlist sync probe
+        run: python scripts/league_sync_probe.py
 
       - name: Fetch lineups (availability + experienced starters %)
         env:
