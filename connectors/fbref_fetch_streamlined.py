@@ -1,158 +1,160 @@
 #!/usr/bin/env python3
 """
-FBref streamlined fetcher (multi-season)
-----------------------------------------
-- Reads seasons from env FBREF_SEASONS (comma-separated), e.g. "2022-2023,2023-2024,2024-2025"
-- For each season and each canonical slice:
-    * fetch slice via soccerdata (with synonyms fallback)
-    * clean keys (team/league/season), drop non-key all-NaN cols
-    * write per-season shard: data/fbref_slice_<slice>__<season>.csv
-- After all seasons, consolidates shards => data/fbref_slice_<slice>.csv
-- Writes a manifest: data/fbref_slices_manifest.json
-- Does NOT do any giant in-memory merges; enrichment reads per-slice CSVs directly.
+fbref_fetch_streamlined.py — FBR API fetcher with strict rate-limiting.
 
-Env (optional):
-  FBREF_LEAGUE="ENG-Premier League"
-  FBREF_SEASONS="2022-2023,2023-2024,2024-2025"
-  FBREF_SLICES="standard,shooting,passing,keepers,goal_shot_creation,misc"  (subset if desired)
+- Enforces BOTH a minimum interval between calls (default 6s) and a 10-calls/min cap.
+- Reads ephemeral/stored FBR_API_KEY from env (set by fbr_generate_api_key.py or Secrets).
+- Fetches a configurable list of endpoints and saves JSON snapshots for downstream normalization.
+
+Env:
+  FBR_API_KEY              : required (exported earlier in workflow)
+  FBR_BASE_URL             : default "https://fbrapi.com"
+  FBR_MIN_INTERVAL_SEC     : default "6"
+  FBR_MAX_CALLS_PER_MIN    : default "10"
+  FBR_ENDPOINTS            : CSV of paths; defaults below
+  FBR_OUT_DIR              : default "data/fbr"
+  FBR_TIMEOUT_SEC          : default "30"
+  FBR_RETRIES              : default "3"
+
+Defaults for FBR_ENDPOINTS (edit as your provider exposes):
+  "/leagues", "/matches/upcoming", "/matches/recent"
+
+Outputs:
+  data/fbr/YYYYMMDD_HHMMSS_<slug>.json   one file per endpoint (timestamped)
+  data/fbr/_INDEX.csv                    manifest of pulls (endpoint, file, status, rows if array-like)
+
+Notes:
+- Uses urllib (no extra deps). If FBR returns rate-limit headers later we can honor them.
+- Token-bucket with 60s window + min-interval gate.
 """
 
-import os, json, glob
+import os, sys, time, json, math
+import urllib.request
+from datetime import datetime, timezone
+from collections import deque
 import pandas as pd
 
-DATA = "data"
-os.makedirs(DATA, exist_ok=True)
+BASE_URL = os.environ.get("FBR_BASE_URL", "https://fbrapi.com").rstrip("/")
+API_KEY  = os.environ.get("FBR_API_KEY", "").strip()
+MIN_INTERVAL = float(os.environ.get("FBR_MIN_INTERVAL_SEC", "6"))
+MAX_PER_MIN  = int(os.environ.get("FBR_MAX_CALLS_PER_MIN", "10"))
+OUT_DIR = os.environ.get("FBR_OUT_DIR", "data/fbr")
+TIMEOUT = int(os.environ.get("FBR_TIMEOUT_SEC", "30"))
+RETRIES = int(os.environ.get("FBR_RETRIES", "3"))
 
-COMP     = os.environ.get("FBREF_LEAGUE", "ENG-Premier League")
-SEASONS  = [s.strip() for s in os.environ.get("FBREF_SEASONS", "2022-2023,2023-2024,2024-2025").split(",") if s.strip()]
+DEFAULT_ENDPOINTS = ["/leagues", "/matches/upcoming", "/matches/recent"]
+ENDPOINTS = [p.strip() for p in os.environ.get("FBR_ENDPOINTS", ",".join(DEFAULT_ENDPOINTS)).split(",") if p.strip()]
 
-# Canonical slices + synonyms (robust to soccerdata versions)
-CANONICAL_SLICES = {
-    "standard":            ["standard"],
-    "shooting":            ["shooting"],
-    "passing":             ["passing"],
-    "passing_types":       ["passing_types", "pass_types", "passing-types"],
-    "defense":             ["defense", "defending", "defensive_actions"],
-    "possession":          ["possession"],
-    "playing_time":        ["playing_time", "time"],
-    "keepers":             ["keepers", "keeper", "gk"],
-    "keepers_adv":         ["keepers_adv", "keeper_adv", "keepers-adv", "gk_adv"],
-    "goal_shot_creation":  ["goal_shot_creation", "gca"],
-    "misc":                ["misc", "miscellaneous"],
-}
+os.makedirs(OUT_DIR, exist_ok=True)
 
-# Optional subset (canonical keys)
-ENV_SLICES = [s.strip() for s in os.environ.get("FBREF_SLICES","").split(",") if s.strip()]
-CANONICAL_ORDER = [k for k in CANONICAL_SLICES if (not ENV_SLICES or k in ENV_SLICES)]
+def _now_utc():
+    return datetime.now(timezone.utc)
 
-KEYS = ("team","league","season")
-TEAM_ALIASES   = ("Squad", "squad", "Team", "team_name", "club", "Club")
-LEAGUE_ALIASES = ("Comp", "comp", "League", "competition", "Competition")
-SEASON_ALIASES = ("Season", "season", "Year", "year")
+class RateLimiter:
+    """Both a min-interval gate and a 10-calls/min token bucket."""
+    def __init__(self, min_interval_sec=6.0, max_calls_per_min=10):
+        self.min_interval = max(0.0, float(min_interval_sec))
+        self.max_calls = max(1, int(max_calls_per_min))
+        self.last_ts = 0.0
+        self.calls = deque()  # timestamps of last minute
 
-def _norm_cols(df): df.columns=[str(c).strip() for c in df.columns]; return df
+    def wait(self):
+        # enforce token bucket over last 60s
+        now = time.time()
+        while self.calls and (now - self.calls[0]) > 60.0:
+            self.calls.popleft()
 
-def _ensure_keys(df):
-    if "team" not in df.columns:
-        for alt in TEAM_ALIASES:
-            if alt in df.columns: df["team"] = df[alt]; break
-    if "league" not in df.columns:
-        for alt in LEAGUE_ALIASES:
-            if alt in df.columns: df["league"] = df[alt]; break
-    if "season" not in df.columns:
-        for alt in SEASON_ALIASES:
-            if alt in df.columns: df["season"] = df[alt]; break
-    for k in KEYS:
-        if k not in df.columns: df[k] = None
-    return df
+        if len(self.calls) >= self.max_calls:
+            sleep_for = 60.0 - (now - self.calls[0]) + 0.01
+            if sleep_for > 0:
+                time.sleep(sleep_for)
+                now = time.time()
+                while self.calls and (now - self.calls[0]) > 60.0:
+                    self.calls.popleft()
 
-def _drop_nonkey_allna(df):
-    to_drop = [c for c in df.columns if c not in KEYS and df[c].isna().all()]
-    return df.drop(columns=to_drop) if to_drop else df
+        # enforce min interval
+        delta = now - self.last_ts
+        if delta < self.min_interval:
+            time.sleep(self.min_interval - delta)
 
-def _write_shard(df: pd.DataFrame, canonical: str, season: str) -> bool:
-    if df is None or df.empty: return False
-    df = df.reset_index()
-    df = _norm_cols(df)
-    df = _ensure_keys(df)
-    # force season column to this season (some slices may omit)
-    df["season"] = df["season"].fillna(season).astype(str)
-    df = _drop_nonkey_allna(df)
-    if not any(c for c in df.columns if c not in KEYS): return False
-    out = os.path.join(DATA, f"fbref_slice_{canonical}__{season}.csv")
-    df.to_csv(out, index=False)
-    print(f"[FBref] saved shard {canonical} {season} → {out} shape={df.shape}")
-    return True
+        self.last_ts = time.time()
+        self.calls.append(self.last_ts)
 
-def _try_stat_type(fb, canonical: str, season: str) -> bool:
-    for candidate in CANONICAL_SLICES[canonical]:
+def safe_get(path, headers=None, retries=3, timeout=30, rl: RateLimiter=None):
+    if rl is None:
+        rl = RateLimiter(MIN_INTERVAL, MAX_PER_MIN)
+    url = f"{BASE_URL}{path}"
+    req = urllib.request.Request(url, headers=headers or {}, method="GET")
+    for attempt in range(1, retries + 1):
         try:
-            raw = fb.read_team_season_stats(stat_type=candidate)
+            rl.wait()
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = resp.read()
+                # Try json decode, but return raw text if it fails
+                try:
+                    return True, json.loads(data.decode("utf-8"))
+                except Exception:
+                    return True, data.decode("utf-8", errors="replace")
         except Exception as e:
-            print(f"[FBref] {canonical}/{season} via '{candidate}' failed: {e}")
-            continue
-        if raw is None or raw.empty:
-            print(f"[FBref] {canonical}/{season} via '{candidate}' empty")
-            continue
-        if _write_shard(raw, canonical, season):
-            print(f"[FBref] {canonical}/{season} resolved via '{candidate}'")
-            return True
-        else:
-            print(f"[FBref] {canonical}/{season} via '{candidate}' no usable columns after cleaning")
-    return False
+            if attempt >= retries:
+                return False, f"{e}"
+            # backoff: min_interval * attempt
+            time.sleep(MIN_INTERVAL * attempt)
+    return False, "unreachable"
 
-def _consolidate_slice(canonical: str):
-    """Combine per-season shards for this slice → data/fbref_slice_<canonical>.csv"""
-    shard_glob = os.path.join(DATA, f"fbref_slice_{canonical}__*.csv")
-    shard_paths = sorted(glob.glob(shard_glob))
-    if not shard_paths:
-        # no shards → ensure consolidated file does not linger stale
-        out = os.path.join(DATA, f"fbref_slice_{canonical}.csv")
-        if os.path.exists(out):
-            os.remove(out)
-        print(f"[FBref] consolidate {canonical}: no shards found")
-        return
+def slugify(path):
+    s = path.strip().strip("/").replace("/", "_")
+    return s or "root"
 
-    frames = []
-    for p in shard_paths:
-        try:
-            frames.append(pd.read_csv(p))
-        except Exception:
-            pass
-    if not frames:
-        print(f"[FBref] consolidate {canonical}: all shards broken/empty")
-        return
-
-    # Small vertical concat is safe (few seasons × ~20 teams)
-    df = pd.concat(frames, axis=0, ignore_index=True)
-    # Keep keys first
-    cols = list(df.columns)
-    key_cols = [c for c in KEYS if c in cols]
-    other = [c for c in cols if c not in key_cols]
-    df = df[key_cols + other]
-    out = os.path.join(DATA, f"fbref_slice_{canonical}.csv")
-    df.to_csv(out, index=False)
-    print(f"[FBref] consolidated {canonical} → {out} rows={len(df)} cols={len(df.columns)}")
+def detect_rows(payload):
+    """Try to infer how many 'rows' the payload has if it's list-like."""
+    try:
+        if isinstance(payload, list):
+            return len(payload)
+        if isinstance(payload, dict):
+            # try common keys
+            for k in ("results", "data", "items", "response"):
+                if k in payload and isinstance(payload[k], list):
+                    return len(payload[k])
+    except Exception:
+        pass
+    return None
 
 def main():
-    manifest = {"league": COMP, "seasons": SEASONS, "slices": []}
+    if not API_KEY:
+        print("[FBR] ERROR: FBR_API_KEY not set. Generate it earlier in the workflow.", file=sys.stderr)
+        sys.exit(1)
+
+    headers = {"Authorization": f"Bearer {API_KEY}"}
+    rl = RateLimiter(MIN_INTERVAL, MAX_PER_MIN)
+
+    manifest = []
+
+    ts = _now_utc().strftime("%Y%m%d_%H%M%S")
+    for path in ENDPOINTS:
+        ok, payload = safe_get(path, headers=headers, retries=RETRIES, timeout=TIMEOUT, rl=rl)
+        slug = slugify(path)
+        out_path = os.path.join(OUT_DIR, f"{ts}_{slug}.json")
+        try:
+            with open(out_path, "w", encoding="utf-8") as f:
+                if isinstance(payload, (dict, list)):
+                    json.dump(payload, f, ensure_ascii=False)
+                else:
+                    f.write(str(payload))
+            rows = detect_rows(payload)
+            print(f"[FBR] {path} → ok={ok} rows={rows if rows is not None else 'n/a'} file={out_path}")
+            manifest.append({"ts": ts, "endpoint": path, "file": out_path, "ok": ok, "rows": rows})
+        except Exception as e:
+            print(f"[FBR] write failed for {path}: {e}", file=sys.stderr)
+            manifest.append({"ts": ts, "endpoint": path, "file": out_path, "ok": False, "rows": None, "error": str(e)})
+
+    # Write manifest
+    idx = os.path.join(OUT_DIR, "_INDEX.csv")
     try:
-        import soccerdata as sd
-        for season in SEASONS:
-            fb = sd.FBref(leagues=COMP, seasons=[season])
-            for canonical in CANONICAL_ORDER:
-                if _try_stat_type(fb, canonical, season):
-                    manifest["slices"] = sorted(set(manifest["slices"] + [canonical]))
+        pd.DataFrame(manifest).to_csv(idx, index=False)
+        print(f"[FBR] Manifest written to {idx} (n={len(manifest)})")
     except Exception as e:
-        print(f"[FBref] top-level failure: {e}")
-
-    # Consolidate per-slice shards across seasons
-    for canonical in CANONICAL_ORDER:
-        _consolidate_slice(canonical)
-
-    with open(os.path.join(DATA, "fbref_slices_manifest.json"), "w", encoding="utf-8") as f:
-        json.dump(manifest, f, indent=2)
-    print(f"[FBref] manifest → data/fbref_slices_manifest.json {manifest}")
+        print(f"[FBR] Failed writing manifest: {e}", file=sys.stderr)
 
 if __name__ == "__main__":
     main()
