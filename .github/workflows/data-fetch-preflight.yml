@@ -10,24 +10,31 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write   # needed only if you enable the optional auto-commit of HISTORY_LOG.csv
+  contents: write
 
 jobs:
   fetch-and-preflight:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     env:
       PYTHONUNBUFFERED: "1"
-      # Optional global halt (dry-run) for staking:
       # RISK_HALT: "1"
 
       # FBref config via repo Variables (read by the streamlined fetcher)
-      FBREF_LEAGUE: ${{ vars.FBREF_LEAGUE }}                # e.g., "ENG-Premier League"
-      FBREF_SEASONS: ${{ vars.FBREF_SEASONS }}              # e.g., "2022-2023,2023-2024,2024-2025"
-      FBREF_SLICES: ${{ vars.FBREF_SLICES }}                # e.g., "standard,shooting,passing,keepers,goal_shot_creation,misc"
+      FBREF_LEAGUE: ${{ vars.FBREF_LEAGUE }}
+      FBREF_SEASONS: ${{ vars.FBREF_SEASONS }}
+      FBREF_SLICES: ${{ vars.FBREF_SLICES }}
 
-      # API-FOOTBALL league ids (optional; comma-separated) e.g., "39,140,135"
+      # API-FOOTBALL league ids (optional; comma-separated)
       API_FOOTBALL_LEAGUE_IDS: ${{ vars.API_FOOTBALL_LEAGUE_IDS }}
+
+      # ---------- NEW: FBR limits ----------
+      FBR_MIN_INTERVAL_SEC: "6"
+      FBR_MAX_CALLS_PER_MIN: "10"
+      FBR_ENDPOINTS: "/leagues,/matches/upcoming,/matches/recent"
+      FBR_OUT_DIR: "data/fbr"
+      FBR_TIMEOUT_SEC: "30"
+      FBR_RETRIES: "3"
 
     steps:
       - name: Checkout
@@ -61,10 +68,18 @@ jobs:
           if [ -f "audit/requirements.txt" ]; then pip install -r audit/requirements.txt; fi
           mkdir -p data reports .cache/soccerdata
 
+      # Generate FBR API key (ephemeral) — harmless if you don't use FBR downstream
+      - name: Generate FBR API key (ephemeral)
+        run: python scripts/fbr_generate_api_key.py
+
       # ---------------- FETCHERS ----------------
 
       - name: Fetch SPI (robust; ci_width)
         run: python connectors/spi_fetch.py
+
+      # Use the updated, rate-limited FBR fetcher (safe to call even if not essential this run)
+      - name: Fetch FBR API (rate-limited)
+        run: python connectors/fbref_fetch_streamlined.py
 
       - name: Fetch FBref slices → data/fbref_slice_*.csv (retry)
         run: |
@@ -73,7 +88,7 @@ jobs:
             echo "FBref slice fetch attempt $i..."
             python connectors/fbref_fetch_streamlined.py && break
             echo "FBref slice fetch attempt $i failed; sleeping before retry..."
-            sleep $((15 * i))
+            sleep $((30 * i))
           done
 
       - name: Fetch Odds + Fixtures (H2H + OU + BTTS + Spreads; two-key fallback)
@@ -83,7 +98,6 @@ jobs:
         run: python connectors/multi_odds_fetch.py
 
       # ---------- FIXTURES RELIABILITY LAYER ----------
-
       - name: Ensure fixtures exist (API-FOOTBALL fallback)
         env:
           API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
@@ -111,7 +125,6 @@ jobs:
         run: python connectors/lineups_fetch.py
 
       # --------------- PRIORS + ENRICH ---------------
-
       - name: Build cards/corners priors
         run: python scripts/ref_cards_corners_build.py
 
@@ -128,7 +141,6 @@ jobs:
         run: python scripts/rolling_form_exp_decay.py
 
       # --------------- MINI-PRIOR MODELS ---------------
-
       - name: Build xG prior (sim)
         run: python scripts/priors_xg_sim.py
 
@@ -145,7 +157,6 @@ jobs:
         run: python scripts/priors_uncertainty.py
 
       # --------------- FEATURES + RISK ---------------
-
       - name: Build feature diffs & coherence features
         run: python scripts/feature_patcher.py
 
@@ -162,7 +173,6 @@ jobs:
         run: python scripts/why_not_bet_summary.py
 
       # --------------- HISTORY LOGGER ---------------
-
       - name: Append history log (run-time audit)
         env:
           GITHUB_RUN_ID: ${{ github.run_id }}
@@ -170,7 +180,6 @@ jobs:
         run: python scripts/history_logger.py
 
       # --------------- MODEL MATRIX ---------------
-
       - name: Build model-ready matrix
         run: python scripts/model_matrix_build.py
 
@@ -181,7 +190,6 @@ jobs:
         run: python scripts/calibration_report_build.py
 
       # --------------- OPTIONAL TRAINERS ---------------
-
       - name: Train minimal model (rolling CV + per-league isotonic)
         run: python scripts/trainer_minimal.py
 
@@ -192,14 +200,12 @@ jobs:
         run: python scripts/feature_importance_report.py
 
       # --------------- BLANK FILE GUARD ---------------
-
       - name: Guard against blank artifacts
         env:
-          BLANK_FAIL_CRITICAL: "0"   # set to "1" to hard-fail on critical blanks
+          BLANK_FAIL_CRITICAL: "0"
         run: python scripts/blank_file_guard.py
 
       # --------------- BRIEFING / SLOs / SANITY / FORWARD LOOK ---------------
-
       - name: Append source alerts to AUTO_BRIEFING.md
         run: |
           mkdir -p reports
@@ -227,33 +233,24 @@ jobs:
       - name: Forward coverage & gaps
         run: python scripts/forward_coverage_report.py
 
-      # --------------- DEEP PROBE + COUNCIL DECK ---------------
-
       - name: Deep sanity probe (file-by-file)
         run: python scripts/deep_sanity_probe.py
+
+      # NEW — source vitality before building the deck
+      - name: Connector health probe
+        run: python scripts/connectors_health_probe.py
 
       - name: Build Council Deck (one-glance review)
         run: python scripts/council_deck_build.py
 
-      # --------------- OPTIONAL: COMMIT HISTORY TO REPO ---------------
-      # - name: Commit updated HISTORY_LOG.csv to repo
-      #   if: always()
-      #   run: |
-      #     git config user.name "github-actions"
-      #     git config user.email "actions@github.com"
-      #     git add data/HISTORY_LOG.csv
-      #     git commit -m "Append HISTORY_LOG.csv [CI] (run ${{ github.run_id }})" || echo "No changes to commit."
-      #     git push
-
       # --------------- ARTIFACTS ---------------
-
       - name: Upload data & reports
         uses: actions/upload-artifact@v4
         with:
           name: sbm-preflight-artifacts
           path: |
             data/*.csv
+            data/*.parquet
             reports/*.md
             reports/*.csv
             reports/*.json
-          # retention-days: 90
