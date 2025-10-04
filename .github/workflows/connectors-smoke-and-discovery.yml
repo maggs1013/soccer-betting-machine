@@ -30,9 +30,11 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           mkdir -p data reports
 
+      # Ensure repo root importable (connectors/, scripts/)
       - name: Set PYTHONPATH
         run: echo "PYTHONPATH=$PWD" >> $GITHUB_ENV
 
+      # Map both teams' secret names -> canonical envs & print SET/NOT SET
       - name: Set env (common) & presence check
         env:
           APIFOOTBALL_KEY:       ${{ secrets.APIFOOTBALL_KEY }}
@@ -54,6 +56,7 @@ jobs:
           test -n "${FDORG_TOKEN}"      && echo "FDORG_TOKEN: SET"      || echo "FDORG_TOKEN: NOT SET"
           test -n "${THE_ODDS_API_KEY}" && echo "THE_ODDS_API_KEY: SET" || echo "THE_ODDS_API_KEY: NOT SET"
 
+      # Fail fast if required envs missing (smoke context)
       - name: Secret guard (smoke)
         run: python scripts/secret_guard.py --context=smoke
 
@@ -63,14 +66,37 @@ jobs:
       - name: Discover leagues (API-Football)
         run: python connectors/api_football_discover_leagues.py
 
+      # Show discovery outcome directly in logs
+      - name: Show discovered leagues & exported IDs
+        run: |
+          echo "---- discovered_leagues.csv (first 15 lines) ----"
+          if [ -f data/discovered_leagues.csv ]; then
+            wc -l data/discovered_leagues.csv || true
+            sed -n '1,15p' data/discovered_leagues.csv || true
+          else
+            echo "(data/discovered_leagues.csv missing)"
+          fi
+          echo "---- Exported API_FOOTBALL_LEAGUE_IDS env ----"
+          echo "API_FOOTBALL_LEAGUE_IDS=${API_FOOTBALL_LEAGUE_IDS:-'(empty)'}"
+
+      # If discovery failed to export IDs, set a safe fallback (EPL, La Liga, Serie A)
+      - name: Fallback league IDs if discovery empty
+        run: |
+          if [ -z "${API_FOOTBALL_LEAGUE_IDS}" ]; then
+            echo "API_FOOTBALL_LEAGUE_IDS=39,140,135" >> $GITHUB_ENV
+            echo "⚠️ Discovery empty — applied fallback API_FOOTBALL_LEAGUE_IDS=39,140,135"
+          else
+            echo "Discovery exported API_FOOTBALL_LEAGUE_IDS — no fallback needed."
+          fi
+
       - name: API-Football & FD.org smoke tests → CONNECTOR_HEALTH.md
         run: python scripts/connectors_health_probe.py
 
-      # NEW: run forensic diagnoser so logs include HTTP status & body previews
-      - name: Diagnose connectors
+      # Forensic diagnoser: prints HTTP status & small body previews into CONNECTOR_DIAG.md
+      - name: Diagnose connectors (HTTP statuses)
         run: python scripts/diagnose_connectors.py
 
-      # NEW: print the files to the job log for instant visibility
+      # Print summaries into the job log
       - name: Show discovery & health
         run: |
           echo "---- LEAGUE_DISCOVERY.md ----"
