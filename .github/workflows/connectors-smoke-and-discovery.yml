@@ -30,34 +30,39 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           mkdir -p data reports
 
-      # Make repo root importable (connectors/, scripts/)
+      # Ensure repo root on import path (connectors/, scripts/)
       - name: Set PYTHONPATH
         run: echo "PYTHONPATH=$PWD" >> $GITHUB_ENV
 
-      # --- NEW: map both teams' secret names → canonical envs & print presence status ---
+      # Map both teams' secret names -> canonical envs & print SET/NOT SET
       - name: Set env (common) & presence check
         env:
-          # both spellings from both branches/teams:
-          APIFOOTBALL_KEY: ${{ secrets.APIFOOTBALL_KEY }}
-          API_FOOTBALL_KEY_S: ${{ secrets.API_FOOTBALL_KEY }}
-          FOOTBALLDATA_TOKEN: ${{ secrets.FOOTBALLDATA_TOKEN }}
-          FDORG_TOKEN_S: ${{ secrets.FDORG_TOKEN }}
+          # both spellings from both branches/teams
+          APIFOOTBALL_KEY:       ${{ secrets.APIFOOTBALL_KEY }}
+          API_FOOTBALL_KEY_S:    ${{ secrets.API_FOOTBALL_KEY }}
+          FOOTBALLDATA_TOKEN:    ${{ secrets.FOOTBALLDATA_TOKEN }}
+          FDORG_TOKEN_S:         ${{ secrets.FDORG_TOKEN }}
+          THE_ODDS_API_KEY_S:    ${{ secrets.THE_ODDS_API_KEY }}
+          ODDS_API_KEY_LEGACY:   ${{ secrets.ODDS_API_KEY }}
         run: |
-          # choose canonical envs with fallback to the other chat's names
+          # canonical envs with fallback
           API_FOOTBALL_KEY="${API_FOOTBALL_KEY_S:-$APIFOOTBALL_KEY}"
           FDORG_TOKEN="${FDORG_TOKEN_S:-$FOOTBALLDATA_TOKEN}"
+          THE_ODDS_API_KEY="${THE_ODDS_API_KEY_S:-$ODDS_API_KEY_LEGACY}"
 
           # export for later steps
           echo "API_FOOTBALL_KEY=${API_FOOTBALL_KEY}" >> $GITHUB_ENV
           echo "FDORG_TOKEN=${FDORG_TOKEN}"           >> $GITHUB_ENV
+          echo "THE_ODDS_API_KEY=${THE_ODDS_API_KEY}" >> $GITHUB_ENV
 
           # masked presence check
           test -n "${API_FOOTBALL_KEY}" && echo "API_FOOTBALL_KEY: SET" || echo "API_FOOTBALL_KEY: NOT SET"
           test -n "${FDORG_TOKEN}"      && echo "FDORG_TOKEN: SET"      || echo "FDORG_TOKEN: NOT SET"
+          test -n "${THE_ODDS_API_KEY}" && echo "THE_ODDS_API_KEY: SET" || echo "THE_ODDS_API_KEY: NOT SET"
 
-      # Fail fast if required envs missing
-      - name: Secret guard
-        run: python scripts/secret_guard.py
+      # Fail fast if required envs missing (smoke context)
+      - name: Secret guard (smoke)
+        run: python scripts/secret_guard.py --context=smoke
 
       - name: Generate FBR API key (ephemeral)
         run: python scripts/fbr_generate_api_key.py
