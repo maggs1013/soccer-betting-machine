@@ -1,93 +1,105 @@
 #!/usr/bin/env python3
 """
-api_football_connect_smoke.py — quick counts for API-Football
+api_football_connect_smoke.py — wide-horizon smoke test for API-Football
 
-Env required:
-  API_FOOTBALL_KEY          (GitHub Secret)
-  API_FOOTBALL_LEAGUE_IDS   (GitHub Variable, CSV like "39,140,135")
+What it does now
+----------------
+- Reads API_FOOTBALL_KEY from env (canonical; mapped in workflow)
+- Loops *discovered* league IDs (from env: API_FOOTBALL_LEAGUE_IDS)
+- Counts fixtures in [today, today+H] where H = AF_FIXTURES_LOOKAHEAD_DAYS (default 7; you can set 120)
+- Caps work with AF_SMOKE_MAX_LEAGUES (default 60) and AF_SMOKE_MAX_FIXTURES (default 3000)
+- Returns a JSON summary (printed to stdout) for CONNECTOR_HEALTH.md
 
-What it does:
-- For each league id, fetch fixtures in the next 7 days.
-- Tries injuries endpoint for the last 14 days (optional).
-- Prints counts to stdout and returns a dict (when imported).
+Env knobs
+---------
+API_FOOTBALL_KEY          : required
+API_FOOTBALL_LEAGUE_IDS   : comma-separated IDs (set by discovery)
+AF_FIXTURES_LOOKAHEAD_DAYS: default 7  (set 120 to look far ahead)
+AF_SMOKE_MAX_LEAGUES      : default 60 (increase if you want)
+AF_SMOKE_MAX_FIXTURES     : default 3000 (stop early to save quota)
+HTTP_TIMEOUT_SEC          : default 40
+HTTP_RETRIES              : default 3
+APIFOOTBALL_MIN_INTERVAL_SEC / APIFOOTBALL_MAX_CALLS_PER_MIN (rarely needed)
+
+Outputs (printed JSON)
+----------------------
+{
+  "source": "api_football",
+  "ok": true/false,
+  "leagues_used": [ ... up to AF_SMOKE_MAX_LEAGUES ... ],
+  "fixtures_window_days": 120,
+  "fixtures_total": 2345,
+  "errors": []
+}
 """
-import os, sys, json, datetime, requests
 
-def _today_utc():
-    return datetime.datetime.utcnow().date()
+import os, json, datetime
+from connectors.http_client import HttpClient
 
-def _iso(d):
-    return d.strftime("%Y-%m-%d")
+BASE = "https://v3.football.api-sports.io"
+
+def _iso(d): return d.strftime("%Y-%m-%d")
+def _today(): return datetime.datetime.utcnow().date()
+
+def _ids_from_env(name):
+    raw = os.environ.get(name, "").strip()
+    return [s.strip() for s in raw.split(",") if s.strip()]
 
 def smoke():
-    key = os.environ.get("API_FOOTBALL_KEY", "").strip()
-    lid_csv = os.environ.get("API_FOOTBALL_LEAGUE_IDS", "").strip()
+    key = os.environ.get("API_FOOTBALL_KEY","").strip()
+    ids = _ids_from_env("API_FOOTBALL_LEAGUE_IDS")
+    lookahead = int(os.environ.get("AF_FIXTURES_LOOKAHEAD_DAYS", "7"))
+    max_leagues = int(os.environ.get("AF_SMOKE_MAX_LEAGUES", "60"))
+    max_fixtures = int(os.environ.get("AF_SMOKE_MAX_FIXTURES", "3000"))
+    timeout = int(os.environ.get("HTTP_TIMEOUT_SEC", "40"))
+    retries = int(os.environ.get("HTTP_RETRIES", "3"))
 
-    result = {
+    res = {
         "source": "api_football",
         "ok": False,
-        "leagues": [],
-        "fixtures_7d_total": 0,
-        "injuries_14d_total": 0,
+        "leagues_used": [],
+        "fixtures_window_days": lookahead,
+        "fixtures_total": 0,
         "errors": []
     }
 
     if not key:
-        result["errors"].append("API_FOOTBALL_KEY missing")
-        return result
-    if not lid_csv:
-        result["errors"].append("API_FOOTBALL_LEAGUE_IDS missing")
-        return result
+        res["errors"].append("API_FOOTBALL_KEY missing")
+        print(json.dumps(res, indent=2)); return res
+    if not ids:
+        res["errors"].append("API_FOOTBALL_LEAGUE_IDS missing/empty (discovery didn’t export?)")
+        print(json.dumps(res, indent=2)); return res
 
+    http = HttpClient(provider="apifootball", timeout=timeout, retries=retries)
     headers = {"x-apisports-key": key}
-    leagues = [s.strip() for s in lid_csv.split(",") if s.strip()]
-    result["leagues"] = leagues
+    today = _today()
+    end   = today + datetime.timedelta(days=lookahead)
 
-    today = _today_utc()
-    end7  = today + datetime.timedelta(days=7)
-    start14= today - datetime.timedelta(days=14)
+    total = 0
+    used  = []
+    for lid in ids[:max_leagues]:
+        sc, body, _ = http.get(
+            f"{BASE}/fixtures",
+            headers=headers,
+            params={"league": int(lid), "season": today.year, "from": _iso(today), "to": _iso(end)}
+        )
+        if sc == 200 and isinstance(body, dict):
+            n = len((body or {}).get("response", []))
+            total += n
+            used.append(lid)
+        else:
+            preview = body if isinstance(body, str) else json.dumps(body)[:160]
+            res["errors"].append(f"fixtures({lid}) sc={sc} {str(preview)[:160]}")
+        if total >= max_fixtures:
+            res["errors"].append(f"hit AF_SMOKE_MAX_FIXTURES cap ({max_fixtures}), stopping early")
+            break
 
-    fixtures_total = 0
-    injuries_total = 0
+    res["leagues_used"] = used
+    res["fixtures_total"] = total
+    res["ok"] = total > 0
 
-    for lid in leagues:
-        try:
-            # Fixtures next 7 days
-            fx = requests.get(
-                "https://v3.football.api-sports.io/fixtures",
-                headers=headers,
-                params={"league": int(lid), "season": today.year, "from": _iso(today), "to": _iso(end7)},
-                timeout=40
-            )
-            if fx.status_code != 200:
-                result["errors"].append(f"fixtures(leag={lid}) status={fx.status_code} body={fx.text[:200]}")
-            else:
-                fixtures_total += len((fx.json() or {}).get("response", []))
-        except Exception as e:
-            result["errors"].append(f"fixtures(leag={lid}) exc={e}")
-
-        try:
-            # Injuries last 14 days (optional; not all plans include injuries)
-            inj = requests.get(
-                "https://v3.football.api-sports.io/injuries",
-                headers=headers,
-                params={"league": int(lid), "season": today.year, "from": _iso(start14), "to": _iso(today)},
-                timeout=40
-            )
-            if inj.status_code == 200:
-                injuries_total += len((inj.json() or {}).get("response", []))
-            else:
-                # Don't treat injuries failure as fatal; note and continue
-                result["errors"].append(f"injuries(leag={lid}) status={inj.status_code}")
-        except Exception as e:
-            result["errors"].append(f"injuries(leag={lid}) exc={e}")
-
-    result["fixtures_7d_total"]  = fixtures_total
-    result["injuries_14d_total"] = injuries_total
-    result["ok"] = fixtures_total > 0  # basic “green light” if we see any fixtures
-
-    print(json.dumps(result, indent=2))
-    return result
+    print(json.dumps(res, indent=2))
+    return res
 
 if __name__ == "__main__":
     smoke()
