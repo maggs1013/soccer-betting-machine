@@ -30,14 +30,11 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           mkdir -p data reports
 
-      # Ensure repo root on import path (connectors/, scripts/)
       - name: Set PYTHONPATH
         run: echo "PYTHONPATH=$PWD" >> $GITHUB_ENV
 
-      # Map both teams' secret names -> canonical envs & print SET/NOT SET
       - name: Set env (common) & presence check
         env:
-          # both spellings from both branches/teams
           APIFOOTBALL_KEY:       ${{ secrets.APIFOOTBALL_KEY }}
           API_FOOTBALL_KEY_S:    ${{ secrets.API_FOOTBALL_KEY }}
           FOOTBALLDATA_TOKEN:    ${{ secrets.FOOTBALLDATA_TOKEN }}
@@ -45,22 +42,18 @@ jobs:
           THE_ODDS_API_KEY_S:    ${{ secrets.THE_ODDS_API_KEY }}
           ODDS_API_KEY_LEGACY:   ${{ secrets.ODDS_API_KEY }}
         run: |
-          # canonical envs with fallback
           API_FOOTBALL_KEY="${API_FOOTBALL_KEY_S:-$APIFOOTBALL_KEY}"
           FDORG_TOKEN="${FDORG_TOKEN_S:-$FOOTBALLDATA_TOKEN}"
           THE_ODDS_API_KEY="${THE_ODDS_API_KEY_S:-$ODDS_API_KEY_LEGACY}"
 
-          # export for later steps
           echo "API_FOOTBALL_KEY=${API_FOOTBALL_KEY}" >> $GITHUB_ENV
           echo "FDORG_TOKEN=${FDORG_TOKEN}"           >> $GITHUB_ENV
           echo "THE_ODDS_API_KEY=${THE_ODDS_API_KEY}" >> $GITHUB_ENV
 
-          # masked presence check
           test -n "${API_FOOTBALL_KEY}" && echo "API_FOOTBALL_KEY: SET" || echo "API_FOOTBALL_KEY: NOT SET"
           test -n "${FDORG_TOKEN}"      && echo "FDORG_TOKEN: SET"      || echo "FDORG_TOKEN: NOT SET"
           test -n "${THE_ODDS_API_KEY}" && echo "THE_ODDS_API_KEY: SET" || echo "THE_ODDS_API_KEY: NOT SET"
 
-      # Fail fast if required envs missing (smoke context)
       - name: Secret guard (smoke)
         run: python scripts/secret_guard.py --context=smoke
 
@@ -73,10 +66,26 @@ jobs:
       - name: API-Football & FD.org smoke tests → CONNECTOR_HEALTH.md
         run: python scripts/connectors_health_probe.py
 
+      # NEW: run forensic diagnoser so logs include HTTP status & body previews
+      - name: Diagnose connectors
+        run: python scripts/diagnose_connectors.py
+
+      # NEW: print the files to the job log for instant visibility
+      - name: Show discovery & health
+        run: |
+          echo "---- LEAGUE_DISCOVERY.md ----"
+          [ -f reports/LEAGUE_DISCOVERY.md ] && sed -n '1,120p' reports/LEAGUE_DISCOVERY.md || echo "(missing)"
+          echo "---- CONNECTOR_HEALTH.md ----"
+          [ -f reports/CONNECTOR_HEALTH.md ] && sed -n '1,120p' reports/CONNECTOR_HEALTH.md || echo "(missing)"
+          echo "---- CONNECTOR_DIAG.md ----"
+          [ -f reports/CONNECTOR_DIAG.md ] && sed -n '1,200p' reports/CONNECTOR_DIAG.md || echo "(missing)"
+
       - name: Assert connectors healthy
         run: python scripts/sanity_assert.py --mode=connectors
 
+      # ALWAYS upload artifacts even on failure
       - name: Upload smoke artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: sbm-smoke-artifacts
@@ -84,3 +93,4 @@ jobs:
             data/discovered_leagues.csv
             reports/LEAGUE_DISCOVERY.md
             reports/CONNECTOR_HEALTH.md
+            reports/CONNECTOR_DIAG.md
