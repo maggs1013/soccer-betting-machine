@@ -30,30 +30,42 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           mkdir -p data reports
 
-      # NEW: ensure repo root is on Python's import path (fixes "No module named 'connectors'")
+      # Make repo root importable (connectors/, scripts/)
       - name: Set PYTHONPATH
         run: echo "PYTHONPATH=$PWD" >> $GITHUB_ENV
 
-      - name: Secret guard
+      # --- NEW: map both teams' secret names → canonical envs & print presence status ---
+      - name: Set env (common) & presence check
         env:
-          THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
-          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
-          THE_ODDS_API_KEY_BACKUP: ${{ secrets.THE_ODDS_API_KEY_BACKUP }}
-          FDORG_TOKEN: ${{ secrets.FDORG_TOKEN }}
+          # both spellings from both branches/teams:
+          APIFOOTBALL_KEY: ${{ secrets.APIFOOTBALL_KEY }}
+          API_FOOTBALL_KEY_S: ${{ secrets.API_FOOTBALL_KEY }}
+          FOOTBALLDATA_TOKEN: ${{ secrets.FOOTBALLDATA_TOKEN }}
+          FDORG_TOKEN_S: ${{ secrets.FDORG_TOKEN }}
+        run: |
+          # choose canonical envs with fallback to the other chat's names
+          API_FOOTBALL_KEY="${API_FOOTBALL_KEY_S:-$APIFOOTBALL_KEY}"
+          FDORG_TOKEN="${FDORG_TOKEN_S:-$FOOTBALLDATA_TOKEN}"
+
+          # export for later steps
+          echo "API_FOOTBALL_KEY=${API_FOOTBALL_KEY}" >> $GITHUB_ENV
+          echo "FDORG_TOKEN=${FDORG_TOKEN}"           >> $GITHUB_ENV
+
+          # masked presence check
+          test -n "${API_FOOTBALL_KEY}" && echo "API_FOOTBALL_KEY: SET" || echo "API_FOOTBALL_KEY: NOT SET"
+          test -n "${FDORG_TOKEN}"      && echo "FDORG_TOKEN: SET"      || echo "FDORG_TOKEN: NOT SET"
+
+      # Fail fast if required envs missing
+      - name: Secret guard
         run: python scripts/secret_guard.py
 
       - name: Generate FBR API key (ephemeral)
         run: python scripts/fbr_generate_api_key.py
 
       - name: Discover leagues (API-Football)
-        env:
-          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
         run: python connectors/api_football_discover_leagues.py
 
       - name: API-Football & FD.org smoke tests → CONNECTOR_HEALTH.md
-        env:
-          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
-          FDORG_TOKEN: ${{ secrets.FDORG_TOKEN }}
         run: python scripts/connectors_health_probe.py
 
       - name: Assert connectors healthy
