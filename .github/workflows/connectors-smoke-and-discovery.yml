@@ -1,0 +1,60 @@
+name: SBM — Connectors Smoke & Discovery
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PYTHONUNBUFFERED: "1"
+      # Optional discovery filters (leave blank to track all)
+      # API_FOOTBALL_DISCOVER_COUNTRIES: "England,Spain,Italy"
+      API_FOOTBALL_DISCOVER_TYPE: "league"
+      MAX_DISCOVERED_LEAGUES: "60"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; pip install -r requirements.txt; fi
+
+      # FBR key (harmless if unused this run)
+      - name: Generate FBR API key (ephemeral)
+        run: python scripts/fbr_generate_api_key.py
+
+      - name: Discover leagues (API-Football)
+        env:
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+        run: python connectors/api_football_discover_leagues.py
+
+      - name: API-Football & FD.org smoke tests → CONNECTOR_HEALTH.md
+        env:
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+          FDORG_TOKEN: ${{ secrets.FDORG_TOKEN }}
+        run: python scripts/connectors_health_probe.py
+
+      # Assert we have at least some inputs before full pipeline
+      - name: Assert connectors healthy
+        run: python scripts/sanity_assert.py --mode=connectors
+
+      - name: Upload smoke artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbm-smoke-artifacts
+          path: |
+            data/discovered_leagues.csv
+            reports/LEAGUE_DISCOVERY.md
+            reports/CONNECTOR_HEALTH.md
