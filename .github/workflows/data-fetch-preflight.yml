@@ -19,6 +19,7 @@ jobs:
     env:
       PYTHONUNBUFFERED: "1"
       # RISK_HALT: "1"
+      # ALLOW_EMPTY_SLATE: "0"   # set to "1" to bypass asserts (not recommended)
 
       # FBref config via repo Variables (read by the streamlined fetcher)
       FBREF_LEAGUE: ${{ vars.FBREF_LEAGUE }}
@@ -26,9 +27,8 @@ jobs:
       FBREF_SLICES: ${{ vars.FBREF_SLICES }}
 
       # ---------- Optional discovery filters ----------
-      # If you want to restrict discovery: e.g. "England,Spain,Italy"
       # API_FOOTBALL_DISCOVER_COUNTRIES: ""
-      # API_FOOTBALL_DISCOVER_TYPE: "league"   # or "all" to include cups
+      API_FOOTBALL_DISCOVER_TYPE: "league"
       # API_FOOTBALL_DISCOVER_SEASONS: ""      # e.g. "2024,2025"
       MAX_DISCOVERED_LEAGUES: "60"
 
@@ -72,14 +72,42 @@ jobs:
           if [ -f "audit/requirements.txt" ]; then pip install -r audit/requirements.txt; fi
           mkdir -p data reports .cache/soccerdata
 
+      # Ensure repo root on import path (connectors/, scripts/)
+      - name: Set PYTHONPATH
+        run: echo "PYTHONPATH=$PWD" >> $GITHUB_ENV
+
+      # Map both teams' secret names -> canonical envs & presence check
+      - name: Set env (common) & presence check
+        env:
+          APIFOOTBALL_KEY:       ${{ secrets.APIFOOTBALL_KEY }}
+          API_FOOTBALL_KEY_S:    ${{ secrets.API_FOOTBALL_KEY }}
+          FOOTBALLDATA_TOKEN:    ${{ secrets.FOOTBALLDATA_TOKEN }}
+          FDORG_TOKEN_S:         ${{ secrets.FDORG_TOKEN }}
+          THE_ODDS_API_KEY_S:    ${{ secrets.THE_ODDS_API_KEY }}
+          ODDS_API_KEY_LEGACY:   ${{ secrets.ODDS_API_KEY }}
+        run: |
+          API_FOOTBALL_KEY="${API_FOOTBALL_KEY_S:-$APIFOOTBALL_KEY}"
+          FDORG_TOKEN="${FDORG_TOKEN_S:-$FOOTBALLDATA_TOKEN}"
+          THE_ODDS_API_KEY="${THE_ODDS_API_KEY_S:-$ODDS_API_KEY_LEGACY}"
+
+          echo "API_FOOTBALL_KEY=${API_FOOTBALL_KEY}" >> $GITHUB_ENV
+          echo "FDORG_TOKEN=${FDORG_TOKEN}"           >> $GITHUB_ENV
+          echo "THE_ODDS_API_KEY=${THE_ODDS_API_KEY}" >> $GITHUB_ENV
+
+          test -n "${API_FOOTBALL_KEY}" && echo "API_FOOTBALL_KEY: SET" || echo "API_FOOTBALL_KEY: NOT SET"
+          test -n "${FDORG_TOKEN}"      && echo "FDORG_TOKEN: SET"      || echo "FDORG_TOKEN: NOT SET"
+          test -n "${THE_ODDS_API_KEY}" && echo "THE_ODDS_API_KEY: SET" || echo "THE_ODDS_API_KEY: NOT SET"
+
+      # Fail fast if required envs missing (preflight context)
+      - name: Secret guard (preflight)
+        run: python scripts/secret_guard.py --context=preflight
+
       # (Optional) FBR key if you use FBR API elsewhere
       - name: Generate FBR API key (ephemeral)
         run: python scripts/fbr_generate_api_key.py
 
-      # ---------- NEW: Discover active API-Football leagues ----------
+      # ---------- Discover active API-Football leagues ----------
       - name: Discover leagues (API-Football)
-        env:
-          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
         run: python connectors/api_football_discover_leagues.py
 
       # ---------------- FETCHERS ----------------
@@ -101,17 +129,10 @@ jobs:
           done
 
       - name: Fetch Odds + Fixtures (H2H + OU + BTTS + Spreads; two-key fallback)
-        env:
-          THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
-          THE_ODDS_API_KEY_BACKUP: ${{ secrets.THE_ODDS_API_KEY_BACKUP }}
         run: python connectors/multi_odds_fetch.py
 
       # ---------- FIXTURES RELIABILITY LAYER ----------
       - name: Ensure fixtures exist (API-FOOTBALL fallback)
-        env:
-          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
-          # uses API_FOOTBALL_LEAGUE_IDS exported by discovery (this job env)
-          API_FOOTBALL_LEAGUE_IDS: ${{ env.API_FOOTBALL_LEAGUE_IDS }}
         run: python connectors/fixtures_fallback_api_football.py
 
       - name: Persist opening/closing odds & line-moves
@@ -120,18 +141,17 @@ jobs:
       - name: Fixtures debug probe
         run: python scripts/fixtures_debug_probe.py
 
+      # Hard stop if still no fixtures after fallback (unless ALLOW_EMPTY_SLATE=1)
+      - name: Assert fixtures present
+        run: python scripts/sanity_assert.py --mode=fixtures
+
       - name: Attach API-FOOTBALL IDs to fixtures
-        env:
-          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
-          API_FOOTBALL_LEAGUE_IDS: ${{ env.API_FOOTBALL_LEAGUE_IDS }}
         run: python connectors/api_football_attach_ids.py
 
       - name: League allowlist sync probe
         run: python scripts/league_sync_probe.py
 
       - name: Fetch lineups (availability + experienced starters %)
-        env:
-          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
         run: python connectors/lineups_fetch.py
 
       # --------------- PRIORS + ENRICH ---------------
