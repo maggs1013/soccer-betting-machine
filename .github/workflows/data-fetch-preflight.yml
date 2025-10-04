@@ -25,10 +25,14 @@ jobs:
       FBREF_SEASONS: ${{ vars.FBREF_SEASONS }}
       FBREF_SLICES: ${{ vars.FBREF_SLICES }}
 
-      # API-FOOTBALL league ids (optional; comma-separated)
-      API_FOOTBALL_LEAGUE_IDS: ${{ vars.API_FOOTBALL_LEAGUE_IDS }}
+      # ---------- Optional discovery filters ----------
+      # If you want to restrict discovery: e.g. "England,Spain,Italy"
+      # API_FOOTBALL_DISCOVER_COUNTRIES: ""
+      # API_FOOTBALL_DISCOVER_TYPE: "league"   # or "all" to include cups
+      # API_FOOTBALL_DISCOVER_SEASONS: ""      # e.g. "2024,2025"
+      MAX_DISCOVERED_LEAGUES: "60"
 
-      # ---------- NEW: FBR limits ----------
+      # ---------- FBR limits (safe defaults) ----------
       FBR_MIN_INTERVAL_SEC: "6"
       FBR_MAX_CALLS_PER_MIN: "10"
       FBR_ENDPOINTS: "/leagues,/matches/upcoming,/matches/recent"
@@ -68,16 +72,21 @@ jobs:
           if [ -f "audit/requirements.txt" ]; then pip install -r audit/requirements.txt; fi
           mkdir -p data reports .cache/soccerdata
 
-      # Generate FBR API key (ephemeral) — harmless if you don't use FBR downstream
+      # (Optional) FBR key if you use FBR API elsewhere
       - name: Generate FBR API key (ephemeral)
         run: python scripts/fbr_generate_api_key.py
+
+      # ---------- NEW: Discover active API-Football leagues ----------
+      - name: Discover leagues (API-Football)
+        env:
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+        run: python connectors/api_football_discover_leagues.py
 
       # ---------------- FETCHERS ----------------
 
       - name: Fetch SPI (robust; ci_width)
         run: python connectors/spi_fetch.py
 
-      # Use the updated, rate-limited FBR fetcher (safe to call even if not essential this run)
       - name: Fetch FBR API (rate-limited)
         run: python connectors/fbref_fetch_streamlined.py
 
@@ -101,6 +110,7 @@ jobs:
       - name: Ensure fixtures exist (API-FOOTBALL fallback)
         env:
           API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+          # uses API_FOOTBALL_LEAGUE_IDS exported by discovery (this job env)
           API_FOOTBALL_LEAGUE_IDS: ${{ env.API_FOOTBALL_LEAGUE_IDS }}
         run: python connectors/fixtures_fallback_api_football.py
 
@@ -199,13 +209,12 @@ jobs:
       - name: Build feature-importance report
         run: python scripts/feature_importance_report.py
 
-      # --------------- BLANK FILE GUARD ---------------
+      # --------------- GUARDS / BRIEFING / DECK ---------------
       - name: Guard against blank artifacts
         env:
           BLANK_FAIL_CRITICAL: "0"
         run: python scripts/blank_file_guard.py
 
-      # --------------- BRIEFING / SLOs / SANITY / FORWARD LOOK ---------------
       - name: Append source alerts to AUTO_BRIEFING.md
         run: |
           mkdir -p reports
@@ -236,14 +245,12 @@ jobs:
       - name: Deep sanity probe (file-by-file)
         run: python scripts/deep_sanity_probe.py
 
-      # NEW — source vitality before building the deck
       - name: Connector health probe
         run: python scripts/connectors_health_probe.py
 
       - name: Build Council Deck (one-glance review)
         run: python scripts/council_deck_build.py
 
-      # --------------- ARTIFACTS ---------------
       - name: Upload data & reports
         uses: actions/upload-artifact@v4
         with:
