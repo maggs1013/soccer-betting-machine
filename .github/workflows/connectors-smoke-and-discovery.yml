@@ -92,6 +92,17 @@ jobs:
           echo "---- Exported API_FOOTBALL_LEAGUE_IDS env ----"
           echo "API_FOOTBALL_LEAGUE_IDS=${API_FOOTBALL_LEAGUE_IDS:-'(empty)'}"
 
+      # NEW: show inferred season per league (first 10) from discovery CSV
+      - name: Show season mapping (league_id,season)
+        run: |
+          echo "---- season mapping (league_id,season) ----"
+          if [ -f data/discovered_leagues.csv ]; then
+            # find column numbers for league_id and season by header, then print first 10 rows
+            awk -F',' 'NR==1{for(i=1;i<=NF;i++){if($i=="league_id") lid=i; if($i=="season") sid=i}} NR>1 && lid>0 && sid>0{print $lid","$sid}' data/discovered_leagues.csv | head -n 10 || true
+          else
+            echo "(missing data/discovered_leagues.csv)"
+          fi
+
       # If discovery failed to export IDs, set a safe fallback (EPL, La Liga, Serie A)
       - name: Fallback league IDs if discovery empty
         run: |
