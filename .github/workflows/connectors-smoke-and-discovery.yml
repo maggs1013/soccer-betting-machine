@@ -20,7 +20,7 @@ jobs:
       # ----- Wide-horizon smoke knobs -----
       # API-Football horizon & caps
       AF_FIXTURES_LOOKAHEAD_DAYS: "120"     # look forward 120 days
-      AF_SMOKE_MAX_LEAGUES: "120"           # max leagues processed in smoke
+      AF_SMOKE_MAX_LEAGUES: "500"           # max leagues processed in smoke
       AF_SMOKE_MAX_FIXTURES: "5000"         # global cap to avoid quota blow-ups
 
       # Football-Data.org horizon & caps
