@@ -28,9 +28,9 @@ jobs:
 
       # ---------- Optional discovery filters ----------
       # API_FOOTBALL_DISCOVER_COUNTRIES: ""
-      API_FOOTBALL_DISCOVER_TYPE: "league"
+      API_FOOTBALL_DISCOVER_TYPE: "all"
       # API_FOOTBALL_DISCOVER_SEASONS: ""      # e.g. "2024,2025"
-      MAX_DISCOVERED_LEAGUES: "60"
+      MAX_DISCOVERED_LEAGUES: "500"
 
       # ---------- FBR limits (safe defaults) ----------
       FBR_MIN_INTERVAL_SEC: "6"
