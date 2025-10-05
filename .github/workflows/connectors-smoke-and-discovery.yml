@@ -14,19 +14,19 @@ jobs:
       PYTHONUNBUFFERED: "1"
 
       # ----- Discovery controls -----
-      API_FOOTBALL_DISCOVER_TYPE: "league"  # discover leagues (not cups)
-      MAX_DISCOVERED_LEAGUES: "500"         # raise cap so discovery can return more
+      API_FOOTBALL_DISCOVER_TYPE: "all"  # discover leagues (not cups)
+      MAX_DISCOVERED_LEAGUES: "1000"         # raise cap so discovery can return more
 
       # ----- Wide-horizon smoke knobs -----
       # API-Football horizon & caps
       AF_FIXTURES_LOOKAHEAD_DAYS: "120"     # look forward 120 days
       AF_SMOKE_MAX_LEAGUES: "120"           # max leagues processed in smoke
-      AF_SMOKE_MAX_FIXTURES: "3000"         # global cap to avoid quota blow-ups
+      AF_SMOKE_MAX_FIXTURES: "5000"         # global cap to avoid quota blow-ups
 
       # Football-Data.org horizon & caps
       FDORG_LOOKAHEAD_DAYS: "120"           # look forward 120 days
       FDORG_LOOKBACK_DAYS: "120"            # look back 120 days
-      FDORG_SMOKE_MAX_MATCHES: "3000"       # global cap for FD.org counts
+      FDORG_SMOKE_MAX_MATCHES: "5000"       # global cap for FD.org counts
 
     steps:
       - name: Checkout
