@@ -1,139 +1,148 @@
-name: SBM — Connectors Smoke & Discovery
+#!/usr/bin/env python3
+"""
+api_football_connect_smoke.py — wide-horizon smoke test for API-Football
 
-on:
-  workflow_dispatch: {}
+Fixes:
+- Use per-league *current season* from data/discovered_leagues.csv (not calendar year),
+  which avoids "empty response" when e.g. EPL current season is 2024 but today.year==2025.
 
-permissions:
-  contents: read
+Behavior:
+- Reads API_FOOTBALL_KEY from env
+- Reads league IDs from API_FOOTBALL_LEAGUE_IDS (exported by discovery or locked in workflow)
+- Loads per-league season from data/discovered_leagues.csv when present
+- Counts fixtures in [today, today+AF_FIXTURES_LOOKAHEAD_DAYS] (default 120)
+- If window returns 0, **fallback** to /fixtures?league=<id>&season=<s>&next=AF_FALLBACK_NEXT
+- Caps by AF_SMOKE_MAX_LEAGUES and AF_SMOKE_MAX_FIXTURES, sleeps between calls to respect rate limits
+- Prints a JSON summary consumed by connectors_health_probe.py
 
-jobs:
-  smoke:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    env:
-      PYTHONUNBUFFERED: "1"
+Env knobs:
+  API_FOOTBALL_KEY               (required)
+  API_FOOTBALL_LEAGUE_IDS        (CSV, e.g., 2,3,39,140,...)
+  AF_FIXTURES_LOOKAHEAD_DAYS     (default 120)
+  AF_SMOKE_MAX_LEAGUES           (default 100)
+  AF_SMOKE_MAX_FIXTURES          (default 3000)
+  AF_FALLBACK_NEXT               (default 300)
+  AF_SMOKE_SLEEP_SEC             (default 6)
+  HTTP_TIMEOUT_SEC               (default 40)
+  HTTP_RETRIES                   (default 3)
+"""
 
-      # ----- Force-only Must-Have 9 for the *smoke* checks -----
-      CORE_LEAGUE_IDS: ${{ vars.CORE_LEAGUE_IDS }}  # 2,3,39,140,135,78,61,253,71
+import os
+import json
+import csv
+import time
+import datetime
+from connectors.http_client import HttpClient
 
-      # ----- Discovery controls (broad; used to harvest season metadata) -----
-      API_FOOTBALL_DISCOVER_TYPE: "all"     # include leagues + cups (for UCL/UEL seasons)
-      MAX_DISCOVERED_LEAGUES: "1000"        # broad discovery OK (we'll still lock smoke to CORE ids)
+BASE = "https://v3.football.api-sports.io"
 
-      # ----- Wide-horizon smoke knobs (safe caps) -----
-      # API-Football
-      AF_FIXTURES_LOOKAHEAD_DAYS: "120"
-      AF_SMOKE_MAX_LEAGUES: "500"
-      AF_SMOKE_MAX_FIXTURES: "5000"
-      AF_FALLBACK_NEXT: "300"               # fallback: ask next N fixtures when window returns 0
+def _iso(d): return d.strftime("%Y-%m-%d")
+def _today(): return datetime.datetime.utcnow().date()
 
-      # Football-Data.org
-      FDORG_LOOKAHEAD_DAYS: "120"
-      FDORG_LOOKBACK_DAYS: "120"
-      FDORG_SMOKE_MAX_MATCHES: "5000"
+def _ids_from_env(name):
+    raw = os.environ.get(name, "").strip()
+    return [s.strip() for s in raw.split(",") if s.strip()]
 
-      # Diagnoser sample size
-      LEAGUE_CHECK_SAMPLE: "10"
+def _season_map_from_csv(path="data/discovered_leagues.csv"):
+    """
+    Returns dict[str_id] -> int season.
+    discovery writes: league_id,league_name,country,season,type
+    """
+    m = {}
+    if not os.path.exists(path): return m
+    try:
+        with open(path, newline="", encoding="utf-8") as fh:
+            for r in csv.DictReader(fh):
+                lid = str(r.get("league_id","")).strip()
+                s   = str(r.get("season","")).strip()
+                if lid and s.isdigit():
+                    m[lid] = int(s)
+    except Exception:
+        pass
+    return m
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+def smoke():
+    key = os.environ.get("API_FOOTBALL_KEY","").strip()
+    ids = _ids_from_env("API_FOOTBALL_LEAGUE_IDS")
+    lookahead     = int(os.environ.get("AF_FIXTURES_LOOKAHEAD_DAYS", "120"))
+    max_leagues   = int(os.environ.get("AF_SMOKE_MAX_LEAGUES", "100"))   # updated default
+    max_fixtures  = int(os.environ.get("AF_SMOKE_MAX_FIXTURES", "3000"))
+    fallback_next = int(os.environ.get("AF_FALLBACK_NEXT", "300"))
+    sleep_sec     = int(os.environ.get("AF_SMOKE_SLEEP_SEC", "6"))
+    timeout       = int(os.environ.get("HTTP_TIMEOUT_SEC", "40"))
+    retries       = int(os.environ.get("HTTP_RETRIES", "3"))
 
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+    res = {
+        "source": "api_football",
+        "ok": False,
+        "leagues_used": [],
+        "fixtures_window_days": lookahead,
+        "fixtures_total": 0,
+        "errors": []
+    }
 
-      - name: Install deps
-        run: |
-          python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          mkdir -p data reports
+    if not key:
+        res["errors"].append("API_FOOTBALL_KEY missing")
+        print(json.dumps(res, indent=2)); return res
+    if not ids:
+        res["errors"].append("API_FOOTBALL_LEAGUE_IDS missing/empty (discovery didn’t export?)")
+        print(json.dumps(res, indent=2)); return res
 
-      # Ensure repo root importable (connectors/, scripts/)
-      - name: Set PYTHONPATH
-        run: echo "PYTHONPATH=$PWD" >> $GITHUB_ENV
+    season_map = _season_map_from_csv()
+    http = HttpClient(provider="apifootball", timeout=timeout, retries=retries)
+    headers = {"x-apisports-key": key}
 
-      # Map both teams' secret names -> canonical envs & print SET/NOT SET
-      - name: Set env (common) & presence check
-        env:
-          APIFOOTBALL_KEY:       ${{ secrets.APIFOOTBALL_KEY }}
-          API_FOOTBALL_KEY_S:    ${{ secrets.API_FOOTBALL_KEY }}
-          FOOTBALLDATA_TOKEN:    ${{ secrets.FOOTBALLDATA_TOKEN }}
-          FDORG_TOKEN_S:         ${{ secrets.FDORG_TOKEN }}
-          THE_ODDS_API_KEY_S:    ${{ secrets.THE_ODDS_API_KEY }}
-          ODDS_API_KEY_LEGACY:   ${{ secrets.ODDS_API_KEY }}
-        run: |
-          API_FOOTBALL_KEY="${API_FOOTBALL_KEY_S:-$APIFOOTBALL_KEY}"
-          FDORG_TOKEN="${FDORG_TOKEN_S:-$FOOTBALLDATA_TOKEN}"
-          THE_ODDS_API_KEY="${THE_ODDS_API_KEY_S:-$ODDS_API_KEY_LEGACY}"
+    today = _today()
+    end   = today + datetime.timedelta(days=lookahead)
 
-          echo "API_FOOTBALL_KEY=${API_FOOTBALL_KEY}" >> $GITHUB_ENV
-          echo "FDORG_TOKEN=${FDORG_TOKEN}"           >> $GITHUB_ENV
-          echo "THE_ODDS_API_KEY=${THE_ODDS_API_KEY}" >> $GITHUB_ENV
+    total = 0
+    used  = []
 
-          test -n "${API_FOOTBALL_KEY}" && echo "API_FOOTBALL_KEY: SET" || echo "API_FOOTBALL_KEY: NOT SET"
-          test -n "${FDORG_TOKEN}"      && echo "FDORG_TOKEN: SET"      || echo "FDORG_TOKEN: NOT SET"
-          test -n "${THE_ODDS_API_KEY}" && echo "THE_ODDS_API_KEY: SET" || echo "THE_ODDS_API_KEY: NOT SET"
+    for i, lid in enumerate(ids[:max_leagues]):
+        season = season_map.get(str(lid), today.year)
 
-      # Fail fast if required envs missing (smoke context)
-      - name: Secret guard (smoke)
-        run: python scripts/secret_guard.py --context=smoke
+        # Primary: date window
+        sc, body, _ = http.get(
+            f"{BASE}/fixtures",
+            headers=headers,
+            params={"league": int(lid), "season": int(season), "from": _iso(today), "to": _iso(end)}
+        )
+        count = 0
+        if sc == 200 and isinstance(body, dict):
+            count = len((body or {}).get("response", []))
+        else:
+            preview = body if isinstance(body, str) else json.dumps(body)[:160]
+            res["errors"].append(f"fixtures(lid={lid}, season={season}) sc={sc} {str(preview)[:160]}")
 
-      - name: Generate FBR API key (ephemeral)
-        run: python scripts/fbr_generate_api_key.py
+        # Fallback: next=N if primary returns zero
+        if count == 0:
+            sc2, body2, _ = http.get(
+                f"{BASE}/fixtures",
+                headers=headers,
+                params={"league": int(lid), "season": int(season), "next": fallback_next}
+            )
+            if sc2 == 200 and isinstance(body2, dict):
+                count = len((body2 or {}).get("response", []))
+            else:
+                prev2 = body2 if isinstance(body2, str) else json.dumps(body2)[:160]
+                res["errors"].append(f"fixtures(lid={lid}, season={season}, next={fallback_next}) sc={sc2} {str(prev2)[:160]}")
 
-      # Broad discovery to harvest per-league current seasons
-      - name: Discover leagues (API-Football)
-        run: python connectors/api_football_discover_leagues.py
+        total += count
+        used.append(str(lid))
 
-      # Lock smoke to CORE ids (Must-Have 9)
-      - name: Lock API_FOOTBALL_LEAGUE_IDS to CORE ids
-        run: |
-          echo "API_FOOTBALL_LEAGUE_IDS=${CORE_LEAGUE_IDS}" >> $GITHUB_ENV
-          echo "Locked API_FOOTBALL_LEAGUE_IDS=${CORE_LEAGUE_IDS}"
+        if total >= max_fixtures:
+            res["errors"].append(f"hit AF_SMOKE_MAX_FIXTURES cap ({max_fixtures}), stopping early")
+            break
 
-      # Show discovery outcome + season mapping
-      - name: Show discovered leagues, seasons & locked IDs
-        run: |
-          echo "---- discovered_leagues.csv (first 15 lines) ----"
-          if [ -f data/discovered_leagues.csv ]; then
-            wc -l data/discovered_leagues.csv || true
-            sed -n '1,15p' data/discovered_leagues.csv || true
-            echo "---- season mapping (league_id,season) ----"
-            awk -F',' 'NR==1{for(i=1;i<=NF;i++){if($i=="league_id") lid=i; if($i=="season") sid=i}} NR>1 && lid>0 && sid>0{print $lid","$sid}' data/discovered_leagues.csv | head -n 10 || true
-          else
-            echo "(missing data/discovered_leagues.csv)"
-          fi
-          echo "---- Locked API_FOOTBALL_LEAGUE_IDS ----"
-          echo "${API_FOOTBALL_LEAGUE_IDS}"
+        # respect provider rate limits
+        if i < len(ids[:max_leagues]) - 1:
+            time.sleep(sleep_sec)
 
-      - name: API-Football & FD.org smoke tests → CONNECTOR_HEALTH.md
-        run: python scripts/connectors_health_probe.py
+    res["leagues_used"] = used
+    res["fixtures_total"] = total
+    res["ok"] = total > 0
+    print(json.dumps(res, indent=2))
+    return res
 
-      - name: Diagnose connectors (HTTP statuses)
-        run: python scripts/diagnose_connectors.py
-
-      - name: Show discovery & health
-        run: |
-          echo "---- LEAGUE_DISCOVERY.md ----"
-          [ -f reports/LEAGUE_DISCOVERY.md ] && sed -n '1,120p' reports/LEAGUE_DISCOVERY.md || echo "(missing)"
-          echo "---- CONNECTOR_HEALTH.md ----"
-          [ -f reports/CONNECTOR_HEALTH.md ] && sed -n '1,120p' reports/CONNECTOR_HEALTH.md || echo "(missing)"
-          echo "---- CONNECTOR_DIAG.md ----"
-          [ -f reports/CONNECTOR_DIAG.md ] && sed -n '1,200p' reports/CONNECTOR_DIAG.md || echo "(missing)"
-
-      - name: Assert connectors healthy
-        run: python scripts/sanity_assert.py --mode=connectors
-
-      # ALWAYS upload artifacts even on failure
-      - name: Upload smoke artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: sbm-smoke-artifacts
-          path: |
-            data/discovered_leagues.csv
-            reports/LEAGUE_DISCOVERY.md
-            reports/CONNECTOR_HEALTH.md
-            reports/CONNECTOR_DIAG.md
+if __name__ == "__main__":
+    smoke()
