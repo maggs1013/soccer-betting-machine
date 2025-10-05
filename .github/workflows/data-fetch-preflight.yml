@@ -26,10 +26,8 @@ jobs:
       FBREF_SEASONS: ${{ vars.FBREF_SEASONS }}
       FBREF_SLICES: ${{ vars.FBREF_SLICES }}
 
-      # ---------- Optional discovery filters ----------
-      # API_FOOTBALL_DISCOVER_COUNTRIES: ""
+      # ---------- Discovery filters (broad) ----------
       API_FOOTBALL_DISCOVER_TYPE: "all"
-      # API_FOOTBALL_DISCOVER_SEASONS: ""      # e.g. "2024,2025"
       MAX_DISCOVERED_LEAGUES: "500"
 
       # ---------- FBR limits (safe defaults) ----------
@@ -39,6 +37,9 @@ jobs:
       FBR_OUT_DIR: "data/fbr"
       FBR_TIMEOUT_SEC: "30"
       FBR_RETRIES: "3"
+
+      # ---------- Core focus ----------
+      CORE_LEAGUE_IDS: ${{ vars.CORE_LEAGUE_IDS }}   # 2,3,39,140,135,78,61,253,71
 
     steps:
       - name: Checkout
@@ -69,10 +70,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           if [ -f "requirements.txt" ]; then pip install -r requirements.txt; fi
-          if [ -f "audit/requirements.txt" ]; then pip install -r audit/requirements.txt; fi
+          if [ -f "audit/requirements.txt" ]; then pip install -r requirements.txt; fi
           mkdir -p data reports .cache/soccerdata
 
-      # Ensure repo root on import path (connectors/, scripts/)
       - name: Set PYTHONPATH
         run: echo "PYTHONPATH=$PWD" >> $GITHUB_ENV
 
@@ -98,20 +98,23 @@ jobs:
           test -n "${FDORG_TOKEN}"      && echo "FDORG_TOKEN: SET"      || echo "FDORG_TOKEN: NOT SET"
           test -n "${THE_ODDS_API_KEY}" && echo "THE_ODDS_API_KEY: SET" || echo "THE_ODDS_API_KEY: NOT SET"
 
-      # Fail fast if required envs missing (preflight context)
       - name: Secret guard (preflight)
         run: python scripts/secret_guard.py --context=preflight
 
-      # (Optional) FBR key if you use FBR API elsewhere
       - name: Generate FBR API key (ephemeral)
         run: python scripts/fbr_generate_api_key.py
 
-      # ---------- Discover active API-Football leagues ----------
+      # Broad discovery to refresh per-league seasons
       - name: Discover leagues (API-Football)
         run: python connectors/api_football_discover_leagues.py
 
-      # ---------------- FETCHERS ----------------
+      # ----- Lock full pipeline to core leagues for now -----
+      - name: Lock API_FOOTBALL_LEAGUE_IDS to CORE ids (preflight)
+        run: |
+          echo "API_FOOTBALL_LEAGUE_IDS=${CORE_LEAGUE_IDS}" >> $GITHUB_ENV
+          echo "Locked API_FOOTBALL_LEAGUE_IDS=${CORE_LEAGUE_IDS} for preflight"
 
+      # ---------------- FETCHERS ----------------
       - name: Fetch SPI (robust; ci_width)
         run: python connectors/spi_fetch.py
 
