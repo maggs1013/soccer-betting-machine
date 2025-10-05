@@ -2,55 +2,25 @@
 """
 football_data_org_connect_smoke.py — wide-horizon health counts for Football-Data.org (FD.org)
 
-What it checks (kept from historical version)
----------------------------------------------
+Checks (kept)
+-------------
 - competitions
-- matches in two windows:
-    next N days (default 7)
-    past M days (default 30)
-- standings (sample: PL, CL)
-- scorers (sample: PL)
+- matches (next N days; past M days)
+- standings (PL, CL)
+- scorers (PL)
 - rate-limit telemetry (X-Requests-Available-Minute, X-Requests-Used)
 
-New capability
---------------
-- Configurable windows via env:
-    FDORG_LOOKAHEAD_DAYS (default 7)   → set 120 for a wide forward slate
-    FDORG_LOOKBACK_DAYS  (default 30)  → set 120 to scan deeper history
-- Global cap to protect quotas:
+New
+---
+- Wide windows via env:
+    FDORG_LOOKAHEAD_DAYS (default 7)  → set 120 to scan forward
+    FDORG_LOOKBACK_DAYS  (default 30) → set 120 to scan back
+- Global cap:
     FDORG_SMOKE_MAX_MATCHES (default 3000)
-- Shared HttpClient: retries, timeouts, 429/Retry-After, min-interval/max-per-minute if needed
-
-Env (optional)
---------------
-FDORG_TOKEN               : bearer token for quotas (secret). Tries unauth if missing.
-FDORG_LOOKAHEAD_DAYS      : default "7"
-FDORG_LOOKBACK_DAYS       : default "30"
-FDORG_SMOKE_MAX_MATCHES   : default "3000"
-HTTP_TIMEOUT_SEC          : default "40"
-HTTP_RETRIES              : default "3"
-FDORG_MIN_INTERVAL_SEC / FDORG_MAX_CALLS_PER_MIN : provider rate knobs (usually unnecessary)
-
-Output (printed JSON; consumed by connectors_health_probe.py)
--------------------------------------------------------------
-{
-  "source": "football_data_org",
-  "ok": true/false,
-  "competitions": 63,
-  "matches_nextN": 1200,
-  "matches_pastM": 980,
-  "lookahead_days": 120,
-  "lookback_days": 120,
-  "standings_ok": 2,
-  "scorers": 19,
-  "errors": [],
-  "rate_limit": {"avail_min": 10, "used": 50}
-}
+- Shared HttpClient (retries, 429 Retry-After, timeouts)
 """
 
-import os
-import json
-import datetime
+import os, json, datetime
 from connectors.http_client import HttpClient
 
 BASE = "https://api.football-data.org/v4"
@@ -59,10 +29,8 @@ def _iso(d): return d.strftime("%Y-%m-%d")
 def _today(): return datetime.datetime.utcnow().date()
 
 def _hdr_int(h, key, default=0):
-    try:
-        return int(h.get(key, default))
-    except Exception:
-        return default
+    try: return int(h.get(key, default))
+    except Exception: return default
 
 def smoke():
     token       = os.environ.get("FDORG_TOKEN","").strip()
@@ -93,7 +61,7 @@ def smoke():
         "rate_limit": {}
     }
 
-    # --- competitions
+    # competitions
     sc, body, hdr = http.get(f"{BASE}/competitions", headers=headers)
     if sc == 200 and isinstance(body, dict):
         result["competitions"] = len(body.get("competitions", []))
@@ -101,14 +69,13 @@ def smoke():
         preview = body if isinstance(body, str) else json.dumps(body)[:160]
         result["errors"].append(f"competitions sc={sc} {str(preview)[:160]}")
 
-    # rate-limit info (if present)
     if isinstance(hdr, dict):
         result["rate_limit"] = {
             "avail_min": _hdr_int(hdr, "X-Requests-Available-Minute", 0),
             "used":      _hdr_int(hdr, "X-Requests-Used", 0),
         }
 
-    # --- matches next window
+    # matches — next window
     sc, body, _ = http.get(f"{BASE}/matches", headers=headers,
                            params={"dateFrom": _iso(today), "dateTo": _iso(end)})
     if sc == 200 and isinstance(body, dict):
@@ -117,7 +84,7 @@ def smoke():
         preview = body if isinstance(body, str) else json.dumps(body)[:160]
         result["errors"].append(f"matches_next sc={sc} {str(preview)[:160]}")
 
-    # --- matches past window
+    # matches — past window
     sc, body, _ = http.get(f"{BASE}/matches", headers=headers,
                            params={"dateFrom": _iso(start), "dateTo": _iso(today)})
     if sc == 200 and isinstance(body, dict):
@@ -126,7 +93,7 @@ def smoke():
         preview = body if isinstance(body, str) else json.dumps(body)[:160]
         result["errors"].append(f"matches_past sc={sc} {str(preview)[:160]}")
 
-    # --- standings (sample comps: EPL=PL, UCL=CL)
+    # standings (PL, CL)
     for comp in ("PL", "CL"):
         sc, body, _ = http.get(f"{BASE}/competitions/{comp}/standings", headers=headers)
         if sc == 200 and isinstance(body, dict):
@@ -135,7 +102,7 @@ def smoke():
             preview = body if isinstance(body, str) else json.dumps(body)[:160]
             result["errors"].append(f"standings({comp}) sc={sc} {str(preview)[:160]}")
 
-    # --- scorers (sample: EPL)
+    # scorers (PL)
     sc, body, _ = http.get(f"{BASE}/competitions/PL/scorers", headers=headers)
     if sc == 200 and isinstance(body, dict):
         result["scorers"] = len(body.get("scorers", []))
@@ -143,7 +110,7 @@ def smoke():
         preview = body if isinstance(body, str) else json.dumps(body)[:160]
         result["errors"].append(f"scorers(PL) sc={sc} {str(preview)[:160]}")
 
-    # green light if we see matches either in nextN or pastM
+    # green light
     result["ok"] = (result["matches_nextN"] + result["matches_pastM"]) > 0
 
     print(json.dumps(result, indent=2))
