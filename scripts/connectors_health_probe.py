@@ -5,16 +5,10 @@ connectors_health_probe.py — run smoke tests and write CONNECTOR_HEALTH.md (+ 
 What’s in here:
 - Adds a summary table (OK/FAIL + headline counts)
 - Surfaces rate-limit telemetry from FD.org smoke (if present)
-- Safer defaults and clearer error rendering
-- Writes a small JSON sidecar for machine use (optional, harmless)
-
-Inputs (via imports):
-  connectors.api_football_connect_smoke.smoke()
-  connectors.football_data_org_connect_smoke.smoke()
-
-Outputs:
-  reports/CONNECTOR_HEALTH.md
-  reports/CONNECTOR_HEALTH.json
+- Backward + forward compatibility with old/new smoke keys:
+    * API-Football: fixtures_total (new) or fixtures_7d_total (old)
+    * FD.org      : matches_nextN/matches_pastM (new) or matches_next7d/matches_past30d (old)
+- Writes a JSON sidecar with harmonized fields for programmatic use
 """
 
 import os
@@ -60,7 +54,7 @@ def main():
     except Exception as e:
         a = {
             "source":"api_football","ok":False,"leagues":[],
-            "fixtures_7d_total":0,"injuries_14d_total":0,
+            "fixtures_total":0,"fixtures_7d_total":0,"injuries_14d_total":0,
             "errors":[f"smoke exc={e}"]
         }
 
@@ -69,23 +63,29 @@ def main():
     except Exception as e:
         f = {
             "source":"football_data_org","ok":False,
-            "competitions":0,"matches_next7d":0,"matches_past30d":0,
-            "standings":0,"scorers":0,"errors":[f"smoke exc={e}"]
+            "competitions":0,"matches_nextN":0,"matches_pastM":0,
+            "matches_next7d":0,"matches_past30d":0,
+            "standings_ok":0,"standings":0,"scorers":0,"errors":[f"smoke exc={e}"]
         }
 
-    # ---------- Summary table ----------
-    af_fix = int(a.get("fixtures_7d_total", 0))
-    af_ok  = bool(a.get("ok", False))
-    fd_m7  = int(f.get("matches_next7d", 0))
-    fd_m30 = int(f.get("matches_past30d", 0))
-    fd_ok  = bool(f.get("ok", False))
+    # ---------- Harmonize headline counts (old/new keys) ----------
+    # API-Football
+    af_total = int(a.get("fixtures_total", a.get("fixtures_7d_total", 0)))
+    af_ok    = bool(a.get("ok", False))
+    af_window_days = int(a.get("fixtures_window_days", a.get("fixtures_window", 7)))
 
+    # FD.org
+    fd_next = int(f.get("matches_nextN",  f.get("matches_next7d",  0)))
+    fd_past = int(f.get("matches_pastM", f.get("matches_past30d", 0)))
+    fd_ok   = bool(f.get("ok", False))
+
+    # ---------- Summary table ----------
     lines += [
         "## Summary", "",
         "| Source | OK | Headline counts |",
         "|---|:---:|---|",
-        f"| API-Football | {'✅' if af_ok else '❌'} | fixtures_next7d={af_fix} |",
-        f"| Football-Data.org | {'✅' if fd_ok else '❌'} | matches_next7d={fd_m7}, matches_past30d={fd_m30} |",
+        f"| API-Football | {'✅' if af_ok else '❌'} | fixtures_total={af_total} (window_days={af_window_days}) |",
+        f"| Football-Data.org | {'✅' if fd_ok else '❌'} | matches_next={fd_next}, matches_past={fd_past} |",
         ""
     ]
     if not (af_ok or fd_ok):
@@ -94,24 +94,29 @@ def main():
     # ---------- Detailed sections ----------
     # API-Football
     leagues_str = ", ".join(a.get("leagues") or []) or "(none)"
+    injuries = int(a.get("injuries_14d_total", a.get("injuries_total", 0)))
     lines += [
         "## API-Football", "",
         f"- Leagues: {leagues_str}",
-        f"- Fixtures next 7d: **{af_fix}**",
-        f"- Injuries last 14d: **{int(a.get('injuries_14d_total',0))}**",
+        f"- Fixtures total (window_days={af_window_days}): **{af_total}**",
+        f"- Injuries (last 14d): **{injuries}**",
     ]
     lines += _errors_block(a)
     lines.append("")
 
     # FD.org (include rate-limit telemetry if present)
     rl = f.get("rate_limit") or {}
+    comps = int(f.get("competitions", 0))
+    # preserve older 'standings' if 'standings_ok' absent
+    standings_ok = int(f.get("standings_ok", f.get("standings", 0)))
+    scorers = int(f.get("scorers", 0))
     lines += [
         "## Football-Data.org", "",
-        f"- Competitions: **{int(f.get('competitions',0))}**",
-        f"- Matches next 7d: **{fd_m7}**",
-        f"- Matches past 30d: **{fd_m30}**",
-        f"- Standings endpoints OK: **{int(f.get('standings',0))}** (PL/CL trials)",
-        f"- Scorers (PL) count: **{int(f.get('scorers',0))}**"
+        f"- Competitions: **{comps}**",
+        f"- Matches next (wide or 7d): **{fd_next}**",
+        f"- Matches past (wide or 30d): **{fd_past}**",
+        f"- Standings endpoints OK: **{standings_ok}** (PL/CL trials)",
+        f"- Scorers (PL) count: **{scorers}**",
     ]
     if rl:
         lines += [f"- Rate limit (FD.org): available/min={int(rl.get('avail_min',0))}, used={int(rl.get('used',0))}"]
@@ -123,7 +128,7 @@ def main():
         fh.write("\n".join(lines) + "\n")
     print(f"connectors_health_probe: wrote {OUT_MD}")
 
-    # Optional JSON sidecar for programmatic checks (harmless)
+    # Optional JSON sidecar (harmonized keys)
     payload = {
         "generated": ts,
         "api_football": a,
@@ -131,9 +136,10 @@ def main():
         "summary": {
             "api_football_ok": af_ok,
             "fdorg_ok": fd_ok,
-            "fixtures_next7d": af_fix,
-            "matches_next7d": fd_m7,
-            "matches_past30d": fd_m30
+            "fixtures_total": af_total,
+            "fixtures_window_days": af_window_days,
+            "matches_next": fd_next,
+            "matches_past": fd_past
         }
     }
     try:
