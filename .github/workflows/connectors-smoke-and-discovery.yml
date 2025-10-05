@@ -13,20 +13,27 @@ jobs:
     env:
       PYTHONUNBUFFERED: "1"
 
-      # ----- Discovery controls -----
-      API_FOOTBALL_DISCOVER_TYPE: "all"  # discover leagues (not cups)
-      MAX_DISCOVERED_LEAGUES: "1000"         # raise cap so discovery can return more
+      # ----- Force-only Must-Have 9 for the *smoke* checks -----
+      CORE_LEAGUE_IDS: ${{ vars.CORE_LEAGUE_IDS }}  # 2,3,39,140,135,78,61,253,71
 
-      # ----- Wide-horizon smoke knobs -----
-      # API-Football horizon & caps
-      AF_FIXTURES_LOOKAHEAD_DAYS: "120"     # look forward 120 days
-      AF_SMOKE_MAX_LEAGUES: "500"           # max leagues processed in smoke
-      AF_SMOKE_MAX_FIXTURES: "5000"         # global cap to avoid quota blow-ups
+      # ----- Discovery controls (broad; used to harvest season metadata) -----
+      API_FOOTBALL_DISCOVER_TYPE: "all"     # include leagues + cups (for UCL/UEL seasons)
+      MAX_DISCOVERED_LEAGUES: "1000"        # broad discovery OK (we'll still lock smoke to CORE ids)
 
-      # Football-Data.org horizon & caps
-      FDORG_LOOKAHEAD_DAYS: "120"           # look forward 120 days
-      FDORG_LOOKBACK_DAYS: "120"            # look back 120 days
-      FDORG_SMOKE_MAX_MATCHES: "5000"       # global cap for FD.org counts
+      # ----- Wide-horizon smoke knobs (safe caps) -----
+      # API-Football
+      AF_FIXTURES_LOOKAHEAD_DAYS: "120"
+      AF_SMOKE_MAX_LEAGUES: "500"
+      AF_SMOKE_MAX_FIXTURES: "5000"
+      AF_FALLBACK_NEXT: "300"               # fallback: ask next N fixtures when window returns 0
+
+      # Football-Data.org
+      FDORG_LOOKAHEAD_DAYS: "120"
+      FDORG_LOOKBACK_DAYS: "120"
+      FDORG_SMOKE_MAX_MATCHES: "5000"
+
+      # Diagnoser sample size
+      LEAGUE_CHECK_SAMPLE: "10"
 
     steps:
       - name: Checkout
@@ -76,51 +83,37 @@ jobs:
       - name: Generate FBR API key (ephemeral)
         run: python scripts/fbr_generate_api_key.py
 
+      # Broad discovery to harvest per-league current seasons
       - name: Discover leagues (API-Football)
         run: python connectors/api_football_discover_leagues.py
 
-      # Show discovery outcome directly in logs
-      - name: Show discovered leagues & exported IDs
+      # Lock smoke to CORE ids (Must-Have 9)
+      - name: Lock API_FOOTBALL_LEAGUE_IDS to CORE ids
+        run: |
+          echo "API_FOOTBALL_LEAGUE_IDS=${CORE_LEAGUE_IDS}" >> $GITHUB_ENV
+          echo "Locked API_FOOTBALL_LEAGUE_IDS=${CORE_LEAGUE_IDS}"
+
+      # Show discovery outcome + season mapping
+      - name: Show discovered leagues, seasons & locked IDs
         run: |
           echo "---- discovered_leagues.csv (first 15 lines) ----"
           if [ -f data/discovered_leagues.csv ]; then
             wc -l data/discovered_leagues.csv || true
             sed -n '1,15p' data/discovered_leagues.csv || true
-          else
-            echo "(data/discovered_leagues.csv missing)"
-          fi
-          echo "---- Exported API_FOOTBALL_LEAGUE_IDS env ----"
-          echo "API_FOOTBALL_LEAGUE_IDS=${API_FOOTBALL_LEAGUE_IDS:-'(empty)'}"
-
-      # NEW: show inferred season per league (first 10) from discovery CSV
-      - name: Show season mapping (league_id,season)
-        run: |
-          echo "---- season mapping (league_id,season) ----"
-          if [ -f data/discovered_leagues.csv ]; then
-            # find column numbers for league_id and season by header, then print first 10 rows
+            echo "---- season mapping (league_id,season) ----"
             awk -F',' 'NR==1{for(i=1;i<=NF;i++){if($i=="league_id") lid=i; if($i=="season") sid=i}} NR>1 && lid>0 && sid>0{print $lid","$sid}' data/discovered_leagues.csv | head -n 10 || true
           else
             echo "(missing data/discovered_leagues.csv)"
           fi
-
-      # If discovery failed to export IDs, set a safe fallback (EPL, La Liga, Serie A)
-      - name: Fallback league IDs if discovery empty
-        run: |
-          if [ -z "${API_FOOTBALL_LEAGUE_IDS}" ]; then
-            echo "API_FOOTBALL_LEAGUE_IDS=39,140,135" >> $GITHUB_ENV
-            echo "⚠️ Discovery empty — applied fallback API_FOOTBALL_LEAGUE_IDS=39,140,135"
-          else
-            echo "Discovery exported API_FOOTBALL_LEAGUE_IDS — no fallback needed."
-          fi
+          echo "---- Locked API_FOOTBALL_LEAGUE_IDS ----"
+          echo "${API_FOOTBALL_LEAGUE_IDS}"
 
       - name: API-Football & FD.org smoke tests → CONNECTOR_HEALTH.md
         run: python scripts/connectors_health_probe.py
 
-      # Forensic diagnoser: prints HTTP status & small body previews into CONNECTOR_DIAG.md
       - name: Diagnose connectors (HTTP statuses)
         run: python scripts/diagnose_connectors.py
 
-      # Print summaries into the job log
       - name: Show discovery & health
         run: |
           echo "---- LEAGUE_DISCOVERY.md ----"
