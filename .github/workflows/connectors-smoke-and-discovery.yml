@@ -14,26 +14,28 @@ jobs:
       PYTHONUNBUFFERED: "1"
 
       # ----- Force-only Must-Have 9 for the *smoke* checks -----
-      CORE_LEAGUE_IDS: ${{ vars.CORE_LEAGUE_IDS }}  # 2,3,39,140,135,78,61,253,71
+      # Define this as a repo Variable in Settings → Secrets and variables → Actions → Variables
+      # Example value (no spaces): 2,3,39,140,135,78,61,253,71
+      CORE_LEAGUE_IDS: ${{ vars.CORE_LEAGUE_IDS }}
 
       # ----- Discovery controls (broad; used to harvest season metadata) -----
-      API_FOOTBALL_DISCOVER_TYPE: "all"     # include leagues + cups
-      MAX_DISCOVERED_LEAGUES: "1000"        # broad discovery OK; we lock smoke to CORE ids
+      API_FOOTBALL_DISCOVER_TYPE: "all"   # include leagues + cups (for UCL/UEL seasons)
+      MAX_DISCOVERED_LEAGUES: "1000"      # broad discovery OK; smoke run is locked to CORE ids
 
       # ----- Wide-horizon smoke knobs (safe caps) -----
       # API-Football
       AF_FIXTURES_LOOKAHEAD_DAYS: "120"
       AF_SMOKE_MAX_LEAGUES: "500"
       AF_SMOKE_MAX_FIXTURES: "5000"
-      AF_FALLBACK_NEXT: "300"               # fallback: ask next N fixtures when window returns 0
-      AF_SMOKE_SLEEP_SEC: "6"               # respect 10 calls/min
+      AF_FALLBACK_NEXT: "300"             # fallback: ask next N fixtures when window returns 0
+      AF_SMOKE_SLEEP_SEC: "6"             # respect ~10 calls/min plans
 
       # Football-Data.org
       FDORG_LOOKAHEAD_DAYS: "120"
       FDORG_LOOKBACK_DAYS: "120"
       FDORG_SMOKE_MAX_MATCHES: "5000"
 
-      # Diagnoser sample size
+      # Diagnoser sampling
       LEAGUE_CHECK_SAMPLE: "10"
 
     steps:
@@ -109,12 +111,22 @@ jobs:
           echo "---- Locked API_FOOTBALL_LEAGUE_IDS ----"
           echo "${API_FOOTBALL_LEAGUE_IDS}"
 
+      # Build health report (Markdown + JSON sidecar if your probe writes it)
       - name: API-Football & FD.org smoke tests → CONNECTOR_HEALTH.md
         run: python scripts/connectors_health_probe.py
 
+      # Forensic diagnoser: per-league status + preview table (Markdown)
       - name: Diagnose connectors (HTTP statuses)
         run: python scripts/diagnose_connectors.py
 
+      # JSON exports for machine-readable analysis
+      - name: Export discovery seasons (JSON)
+        run: python scripts/discovery_seasons_export.py
+
+      - name: Export diagnoser JSON
+        run: python scripts/diagnose_connectors_json.py
+
+      # Print summaries into the job log
       - name: Show discovery & health
         run: |
           echo "---- LEAGUE_DISCOVERY.md ----"
@@ -124,6 +136,7 @@ jobs:
           echo "---- CONNECTOR_DIAG.md ----"
           [ -f reports/CONNECTOR_DIAG.md ] && sed -n '1,200p' reports/CONNECTOR_DIAG.md || echo "(missing)"
 
+      # Keep the strict gate (we want to pass only when we truly have data)
       - name: Assert connectors healthy
         run: python scripts/sanity_assert.py --mode=connectors
 
@@ -137,4 +150,7 @@ jobs:
             data/discovered_leagues.csv
             reports/LEAGUE_DISCOVERY.md
             reports/CONNECTOR_HEALTH.md
+            reports/CONNECTOR_HEALTH.json
             reports/CONNECTOR_DIAG.md
+            reports/CONNECTOR_DIAG.json
+            reports/DISCOVERY_SEASONS.json
